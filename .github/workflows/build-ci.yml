@@ -1,0 +1,37 @@
+name: build-ci
+
+on:
+  push:
+    branches: [ "3.0" ]
+  pull_request:
+    branches: [ "3.0" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Install ESP32 platform
+        run: platformio platform install espressif32
+
+      - name: Build ESP32 4MB WiFi
+        run: platformio run -e esp32_4MB_wifi
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware
+          path: |
+            .pioenvs/esp32_4MB_wifi/firmware.bin
+            .pioenvs/esp32_4MB_wifi/littlefs.bin
+          retention-days: 7

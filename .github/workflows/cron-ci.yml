@@ -1,0 +1,26 @@
+name: cron-ci
+
+on:
+  schedule:
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Install ESP32 platform
+        run: platformio platform install espressif32
+
+      - name: Build ESP32 4MB WiFi
+        run: platformio run -e esp32_4MB_wifi

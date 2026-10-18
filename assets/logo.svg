@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+  <defs>
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#2c3e50;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1a252f;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="chipGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00bcd4;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0097a7;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="200" height="200" fill="url(#bgGradient)" rx="24"/>
+  
+  <!-- Circuit traces -->
+  <path d="M 40 80 L 80 80 L 80 120 L 120 120 L 120 80 L 160 80" stroke="#00bcd4" stroke-width="3" fill="none" opacity="0.6"/>
+  <path d="M 60 40 L 60 80" stroke="#00bcd4" stroke-width="3" fill="none" opacity="0.6"/>
+  <path d="M 100 120 L 100 160" stroke="#00bcd4" stroke-width="3" fill="none" opacity="0.6"/>
+  <path d="M 140 120 L 140 160" stroke="#00bcd4" stroke-width="3" fill="none" opacity="0.6"/>
+  
+  <!-- Circuit nodes -->
+  <circle cx="80" cy="80" r="4" fill="#00bcd4"/>
+  <circle cx="120" cy="120" r="4" fill="#00bcd4"/>
+  <circle cx="60" cy="40" r="3" fill="#00bcd4"/>
+  <circle cx="100" cy="160" r="3" fill="#00bcd4"/>
+  <circle cx="140" cy="160" r="3" fill="#00bcd4"/>
+  
+  <!-- ESP32 chip -->
+  <rect x="70" y="65" width="60" height="70" rx="6" fill="url(#chipGradient)" stroke="#00838f" stroke-width="2"/>
+  <rect x="74" y="69" width="52" height="62" rx="3" fill="none" stroke="#2c3e50" stroke-width="1"/>
+  
+  <!-- Antenna waves -->
+  <path d="M 130 65 Q 150 65 150 55" stroke="#00bcd4" stroke-width="2" fill="none" opacity="0.5"/>
+  <path d="M 130 65 Q 160 65 160 45" stroke="#00bcd4" stroke-width="2" fill="none" opacity="0.3"/>
+  
+  <!-- Print bed / 3D printer element -->
+  <rect x="35" y="125" width="40" height="30" rx="4" fill="#37474f" stroke="#546e7a" stroke-width="1"/>
+  <rect x="40" y="130" width="30" height="20" rx="2" fill="#2c3e50"/>
+  <line x1="35" y1="155" x2="75" y2="155" stroke="#546e7a" stroke-width="2"/>
+  
+  <!-- Text -->
+  <text x="100" y="185" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#ffffff" text-anchor="middle">ESP3D</text>
+  <text x="100" y="198" font-family="Arial, sans-serif" font-size="10" fill="#00bcd4" text-anchor="middle">Ender3</text>
+</svg>

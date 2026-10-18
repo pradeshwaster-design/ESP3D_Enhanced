@@ -1,0 +1,15 @@
+Thumbs.db
+.DS_Store
+*.orig
+embedded/node_modules
+.pio
+.pioenvs
+.piolibdeps
+.vscode/
+*.bin
+*.elf
+*.hex
+*.bundle
+__pycache__/
+push_dryrun.txt
+test-connection.txt
