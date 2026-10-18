@@ -34,6 +34,9 @@
 
 | Category | Capability | Description |
 |---|---|---|
+| 🔘 **Touch UI** | **Inline & Reply Keyboards** | One-tap interactive buttons directly attached to status reports (`[⏸️ Pause] [⏹️ Stop] [📊 Status] [📁 Files]`) + persistent bottom keyboard. |
+| ⚡ **OTA Flash** | **In-Chat Wireless Firmware Update** | Drag and drop any `firmware.bin` into Telegram chat to flash the ESP32 wirelessly over the air without USB or Arduino IDE. |
+| 🎯 **Smart Alerts**| **Layer 1 & Milestone Tracker** | Automated proactive alerts on Layer 1 completion (bed adhesion check), 25%, 50%, 75% progress milestones, and safe-to-touch bed cooldown (≤ 42°C). |
 | 🤖 **2-Way Bot** | **Interactive Telegram Control** | Full bi-directional command center: query status, temperatures, pause, resume, abort, and tune parameters from anywhere in the world. |
 | ⚡ **SD Upload** | **20 MB Cloud G-Code Streaming** | Send `.gcode` files directly via Telegram chat. Handles HTTP 302/307 redirects, HTTP Range resuming (`Range: bytes=start-`), comment stripping, and Marlin XOR checksums. |
 | 🗂️ **SD Manager** | **Interactive File Browser** | `/files` lists SD files with instant one-tap print (`/print_1`) and delete (`/del_1`) command links. |
@@ -134,7 +137,10 @@
 | Command | Arguments | Description | Marlin G-code |
 |---|---|---|---|
 | `/emergency` | — | **EMERGENCY STOP**: Halts motion, kills heaters, locks serial | `M112` |
-| `/reboot` | — | Performs hardware restart of the ESP32 module | Hardware Reset |
+| `/reboot` | — | Reconnects and verifies Marlin over serial | `M999` + `M105` |
+| `/reboot_esp` | — | Performs hardware restart of the ESP32 microcontroller | Software Reset |
+| `/ota` | — | Displays instructions for in-chat Over-The-Air flashing | — |
+| `/start` | — | Displays welcome menu and summons persistent quick-action keyboard | — |
 
 ---
 

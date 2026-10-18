@@ -36,6 +36,12 @@ enum UploadState {
   UPLOAD_STREAMING
 };
 
+enum UploadType {
+  UPLOAD_TYPE_NONE = 0,
+  UPLOAD_TYPE_GCODE,
+  UPLOAD_TYPE_FIRMWARE_OTA
+};
+
 class TelegramMonitor {
  public:
   TelegramMonitor();
@@ -59,8 +65,9 @@ class TelegramMonitor {
   String _pendingCommand;
   String _pendingFromId;
 
-  // Non-blocking G-code file upload state machine
+  // Non-blocking G-code and OTA file upload state machine
   UploadState _uploadState;
+  UploadType _uploadType;
   WiFiClientSecure _uploadClient;
   String _uploadFileId;
   String _uploadFileName;
@@ -87,6 +94,13 @@ class TelegramMonitor {
 
   // Stop cooldown guard (suppresses trailing SD progress reports after /stop)
   uint32_t _stopCooldownUntil;
+
+  // Milestone and Cooldown Notification Flags
+  bool _notifiedLayer1;
+  bool _notifiedMilestone25;
+  bool _notifiedMilestone50;
+  bool _notifiedMilestone75;
+  bool _waitingBedCooldown;
 
   // Printer state
   bool _isPrinting;
@@ -147,12 +161,20 @@ class TelegramMonitor {
   void sendSDFileListReply();
   void sendPrinterInfoReply();
   void startFileUpload(const String& fileId, const String& fileName, uint32_t fileSize);
+  void startFirmwareOtaUpload(const String& fileId, const String& fileName, uint32_t fileSize);
   void handleTelegramFileUpload();
   void sendUploadSerial(const String& str);
 
   void pollTelegramUpdates();
+  void answerCallbackQuery(const String& queryId);
   void processTelegramCommand(String cmd, const String& fromId);
   void sendTelegramReply(const String& text);
+  void sendTelegramMessage(const String& text, const String& replyMarkup = "");
+
+  String getPrintingMarkup();
+  String getPausedMarkup();
+  String getIdleMarkup();
+  String getReplyKeyboardMarkup();
 };
 
 extern TelegramMonitor telegram_monitor;

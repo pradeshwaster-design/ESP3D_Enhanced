@@ -33,6 +33,7 @@
 #include "../notifications/notifications_service.h"
 #include "../serial/serial_service.h"
 #include <WiFiClientSecure.h>
+#include <Update.h>
 
 TelegramMonitor telegram_monitor;
 
@@ -48,6 +49,7 @@ TelegramMonitor::TelegramMonitor() {
   _pendingCommand = "";
   _pendingFromId = "";
   _uploadState = UPLOAD_IDLE;
+  _uploadType = UPLOAD_TYPE_NONE;
   _uploadFileId = "";
   _uploadFileName = "";
   _uploadFilePath = "";
@@ -71,6 +73,11 @@ TelegramMonitor::TelegramMonitor() {
   _uploadResendCount = 0;
   _uploadReconnectCount = 0;
   _stopCooldownUntil = 0;
+  _notifiedLayer1 = false;
+  _notifiedMilestone25 = false;
+  _notifiedMilestone50 = false;
+  _notifiedMilestone75 = false;
+  _waitingBedCooldown = false;
   _isPrinting = false;
   _wasPrinting = false;
   _isPaused = false;
@@ -125,6 +132,7 @@ void TelegramMonitor::begin() {
   _pendingCommand = "";
   _pendingFromId = "";
   _uploadState = UPLOAD_IDLE;
+  _uploadType = UPLOAD_TYPE_NONE;
   _uploadFileId = "";
   _uploadFileName = "";
   _uploadFilePath = "";
@@ -148,6 +156,11 @@ void TelegramMonitor::begin() {
   _uploadResendCount = 0;
   _uploadReconnectCount = 0;
   _stopCooldownUntil = 0;
+  _notifiedLayer1 = false;
+  _notifiedMilestone25 = false;
+  _notifiedMilestone50 = false;
+  _notifiedMilestone75 = false;
+  _waitingBedCooldown = false;
   _isPaused = false;
   _isKilled = false;
   _checkingAlive = false;
@@ -548,9 +561,99 @@ void TelegramMonitor::parseSingleLine(const char* line) {
   }
 }
 
-// ── Outgoing messages ────────────────────────────────────
+// ── Outgoing messages & Telegram Keyboards ───────────────
+String TelegramMonitor::getPrintingMarkup() {
+  return "{\"inline_keyboard\":[[{\"text\":\"⏸️ Pause\",\"callback_data\":\"/pause\"},{\"text\":\"⏹️ Stop\",\"callback_data\":\"/stop\"}],[{\"text\":\"📊 Status\",\"callback_data\":\"/status\"},{\"text\":\"📁 Files\",\"callback_data\":\"/files\"}]]}";
+}
+
+String TelegramMonitor::getPausedMarkup() {
+  return "{\"inline_keyboard\":[[{\"text\":\"▶️ Resume\",\"callback_data\":\"/resume\"},{\"text\":\"⏹️ Stop\",\"callback_data\":\"/stop\"}],[{\"text\":\"📊 Status\",\"callback_data\":\"/status\"},{\"text\":\"📁 Files\",\"callback_data\":\"/files\"}]]}";
+}
+
+String TelegramMonitor::getIdleMarkup() {
+  return "{\"inline_keyboard\":[[{\"text\":\"📊 Status\",\"callback_data\":\"/status\"},{\"text\":\"📁 SD Files\",\"callback_data\":\"/files\"}],[{\"text\":\"ℹ️ Info\",\"callback_data\":\"/info\"},{\"text\":\"❓ Help\",\"callback_data\":\"/help\"}]]}";
+}
+
+String TelegramMonitor::getReplyKeyboardMarkup() {
+  return "{\"keyboard\":[[{\"text\":\"/status\"},{\"text\":\"/files\"}],[{\"text\":\"/pause\"},{\"text\":\"/resume\"},{\"text\":\"/stop\"}],[{\"text\":\"/info\"},{\"text\":\"/help\"}]],\"resize_keyboard\":true}";
+}
+
+void TelegramMonitor::answerCallbackQuery(const String& queryId) {
+  const String& token = notificationsservice.getToken1();
+  if (token.length() == 0 || queryId.length() == 0) return;
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(2000);
+  if (!client.connect("api.telegram.org", 443)) return;
+  String body = "callback_query_id=" + queryId;
+  String req = "POST /bot" + token + "/answerCallbackQuery HTTP/1.1\r\n"
+               "Host: api.telegram.org\r\n"
+               "Connection: close\r\n"
+               "Content-Type: application/x-www-form-urlencoded\r\n"
+               "Content-Length: " + String(body.length()) + "\r\n\r\n" + body;
+  client.print(req);
+  uint32_t t0 = millis();
+  while (!client.available() && (millis() - t0 < 1000)) delay(10);
+  client.stop();
+}
+
+void TelegramMonitor::sendTelegramMessage(const String& text, const String& replyMarkup) {
+  const String& token = notificationsservice.getToken1();
+  const String& chatId = notificationsservice.getToken2();
+  if (token.length() == 0 || chatId.length() == 0) return;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(6000);
+  if (!client.connect("api.telegram.org", 443)) return;
+
+  String encodedMsg = "";
+  encodedMsg.reserve(text.length() * 2);
+  for (size_t i = 0; i < text.length(); i++) {
+    char c = text.charAt(i);
+    if (c == '%') encodedMsg += "%25";
+    else if (c == '&') encodedMsg += "%26";
+    else if (c == '+') encodedMsg += "%2B";
+    else if (c == '#') encodedMsg += "%23";
+    else encodedMsg += c;
+  }
+
+  String data = "chat_id=" + chatId + "&text=" + encodedMsg;
+  if (replyMarkup.length() > 0) {
+    String encodedMarkup = "";
+    encodedMarkup.reserve(replyMarkup.length() * 2);
+    for (size_t i = 0; i < replyMarkup.length(); i++) {
+      char c = replyMarkup.charAt(i);
+      if (c == '%') encodedMarkup += "%25";
+      else if (c == '&') encodedMarkup += "%26";
+      else if (c == '+') encodedMarkup += "%2B";
+      else if (c == '#') encodedMarkup += "%23";
+      else if (c == '"') encodedMarkup += "%22";
+      else if (c == '{') encodedMarkup += "%7B";
+      else if (c == '}') encodedMarkup += "%7D";
+      else if (c == '[') encodedMarkup += "%5B";
+      else if (c == ']') encodedMarkup += "%5D";
+      else if (c == ':') encodedMarkup += "%3A";
+      else if (c == ',') encodedMarkup += "%2C";
+      else if (c == ' ') encodedMarkup += "%20";
+      else encodedMarkup += c;
+    }
+    data += "&reply_markup=" + encodedMarkup;
+  }
+
+  String post = "POST /bot" + token + "/sendMessage HTTP/1.1\r\n"
+                "Host: api.telegram.org\r\n"
+                "Connection: close\r\n"
+                "Content-Type: application/x-www-form-urlencoded\r\n"
+                "Content-Length: " + String(data.length()) + "\r\n\r\n" + data;
+  client.print(post);
+  uint32_t t0 = millis();
+  while (!client.available() && (millis() - t0 < 3000)) delay(10);
+  client.stop();
+}
+
 void TelegramMonitor::sendTelegramReply(const String& text) {
-  notificationsservice.sendMSG("ESP3D", text.c_str());
+  sendTelegramMessage(text, "");
 }
 
 void TelegramMonitor::sendStatusUpdate() {
@@ -594,7 +697,7 @@ void TelegramMonitor::sendStatusUpdate() {
   msg += "Z: " + String(_zHeight, 1) + "mm\n";
   msg += "Speed: " + String(_feedrate) + "% | Flow: " + String(_flowrate) + "%\n";
   msg += "Fan: " + String(_fanPct) + "%";
-  notificationsservice.sendMSG("ESP3D", msg.c_str());
+  sendTelegramMessage(msg, _isPaused ? getPausedMarkup() : getPrintingMarkup());
 }
 
 void TelegramMonitor::sendIdleStatus() {
@@ -609,24 +712,25 @@ void TelegramMonitor::sendIdleStatus() {
   msg += "Hotend: " + String(_hotendActual, 0) + "/" + String(_hotendTarget, 0) + "C\n";
   msg += "Bed: " + String(_bedActual, 0) + "/" + String(_bedTarget, 0) + "C\n";
   msg += "Fan: " + String(_fanPct) + "%";
-  notificationsservice.sendMSG("ESP3D", msg.c_str());
+  sendTelegramMessage(msg, getIdleMarkup());
 }
 
 void TelegramMonitor::sendPrintStarted() {
   if (!notificationsservice.started()) return;
-  String msg = "Print Started!\n";
+  String msg = "🚀 Print Started!\n";
   if (_fileName.length() > 0) msg += "File: " + _fileName + "\n";
-  msg += "Hotend: " + String(_hotendTarget, 0) + "C | Bed: " + String(_bedTarget, 0) + "C";
-  notificationsservice.sendMSG("ESP3D", msg.c_str());
+  msg += "Hotend Target: " + String(_hotendTarget, 0) + "°C | Bed Target: " + String(_bedTarget, 0) + "°C";
+  sendTelegramMessage(msg, getPrintingMarkup());
 }
 
 void TelegramMonitor::sendPrintFinished() {
   if (!notificationsservice.started()) return;
-  String msg = "Print Finished!\n";
+  String msg = "🏁 Print Finished!\n";
   if (_fileName.length() > 0) msg += "File: " + _fileName + "\n";
   if (_printTime.length() > 0) msg += "Total Time: " + _printTime + "\n";
-  msg += "Hotend: " + String(_hotendActual, 0) + "C | Bed: " + String(_bedActual, 0) + "C";
-  notificationsservice.sendMSG("ESP3D", msg.c_str());
+  msg += "Hotend: " + String(_hotendActual, 0) + "°C | Bed: " + String(_bedActual, 0) + "°C\n";
+  msg += "Cooldown in progress. You will be alerted when bed is safe to remove.";
+  sendTelegramMessage(msg, getIdleMarkup());
 }
 
 void TelegramMonitor::sendSDFileListReply() {
@@ -640,7 +744,7 @@ void TelegramMonitor::sendSDFileListReply() {
     msg += "   ▶️ /print_" + String(i + 1) + "  🗑️ /del_" + String(i + 1) + "\n\n";
   }
   msg += "Tap /print_<n> to print, or /del_<n> to delete!";
-  sendTelegramReply(msg);
+  sendTelegramMessage(msg, getIdleMarkup());
 }
 
 void TelegramMonitor::sendPrinterInfoReply() {
@@ -696,6 +800,7 @@ void TelegramMonitor::sendUploadSerial(const String& str) {
 
 // ── Initialize G-code file upload from Telegram ───────────
 void TelegramMonitor::startFileUpload(const String& fileId, const String& fileName, uint32_t fileSize) {
+  _uploadType = UPLOAD_TYPE_GCODE;
   // Create clean 8.3 FAT filename for Marlin
   String base = fileName;
   int dot = base.lastIndexOf('.');
@@ -747,15 +852,58 @@ void TelegramMonitor::startFileUpload(const String& fileId, const String& fileNa
   sendTelegramReply(msg);
 }
 
-// ── Non-blocking streaming of Telegram G-code upload to Marlin SD card ──
+// ── Initialize OTA Firmware Binary Flash from Telegram ────
+void TelegramMonitor::startFirmwareOtaUpload(const String& fileId, const String& fileName, uint32_t fileSize) {
+  _uploadType = UPLOAD_TYPE_FIRMWARE_OTA;
+  _uploadSdName = "";
+  _uploadFileId = fileId;
+  _uploadFileName = fileName;
+  _uploadFileSize = fileSize;
+  _uploadFilePath = "";
+  _uploadBytesSent = 0;
+  _uploadLineNum = 0;
+  _uploadLineBuffer = "";
+  _uploadInFlight = 0;
+  _uploadLastActivity = millis();
+  _uploadLastOkTime = millis();
+  _uploadLastProgressReportTime = millis();
+  _uploadLastProgressPct = 0;
+  _uploadRequestedResend = 0;
+  _uploadLastResendLine = 0;
+  _uploadResendCount = 0;
+  _uploadReconnectCount = 0;
+  _uploadStreamHost = "";
+  _uploadStreamPort = 443;
+  _uploadStreamPath = "";
+  _uploadRedirectCount = 0;
+  _isUploadSerialCaller = false;
+  _uploadState = UPLOAD_RESOLVE_URL;
+
+  String msg = "📥 Starting Telegram OTA Firmware Flash\n\n";
+  msg += "📦 Binary: " + fileName + " (" + String(fileSize / 1024) + " KB)\n";
+  msg += "🌐 Connecting to Telegram Cloud...\n\n";
+  msg += "⚠️ WARNING: Do NOT turn off printer or disconnect power while flashing!";
+  sendTelegramReply(msg);
+}
+
+// ── Non-blocking streaming of Telegram G-code / OTA upload ──
 void TelegramMonitor::handleTelegramFileUpload() {
   uint32_t now = millis();
 
   // Inactivity timeout guard (60 seconds without receiving data)
   if (now - _uploadLastActivity > 60000) {
+    if (_uploadType == UPLOAD_TYPE_FIRMWARE_OTA) {
+      Update.abort();
+      _uploadClient.stop();
+      _uploadState = UPLOAD_IDLE;
+      _uploadType = UPLOAD_TYPE_NONE;
+      sendTelegramReply("❌ Firmware upload timed out! Flash aborted. Existing firmware intact.");
+      return;
+    }
     sendUploadSerial("\nM29\n");
     _uploadClient.stop();
     _uploadState = UPLOAD_IDLE;
+    _uploadType = UPLOAD_TYPE_NONE;
     sendTelegramReply("❌ Upload timed out! Serial SD write cancelled.");
     return;
   }
@@ -982,12 +1130,23 @@ void TelegramMonitor::handleTelegramFileUpload() {
         }
       }
 
-      // Initialize Marlin line number counter and start SD saving
-      sendUploadSerial("M110 N0\n");
-      delay(50);
-      String m28 = "M28 " + _uploadSdName + "\n";
-      sendUploadSerial(m28);
-      delay(100);
+      if (_uploadType == UPLOAD_TYPE_FIRMWARE_OTA) {
+        if (!Update.begin(_uploadFileSize, U_FLASH)) {
+          _uploadClient.stop();
+          _uploadState = UPLOAD_IDLE;
+          _uploadType = UPLOAD_TYPE_NONE;
+          sendTelegramReply("❌ OTA begin failed: " + String(Update.errorString()));
+          return;
+        }
+        sendTelegramReply("⚡ Flashing ESP3D OTA partition (" + String(_uploadFileSize / 1024) + " KB)...");
+      } else {
+        // Initialize Marlin line number counter and start SD saving
+        sendUploadSerial("M110 N0\n");
+        delay(50);
+        String m28 = "M28 " + _uploadSdName + "\n";
+        sendUploadSerial(m28);
+        delay(100);
+      }
 
       _uploadLineNum = 0;
       _uploadLineBuffer = "";
@@ -1007,6 +1166,68 @@ void TelegramMonitor::handleTelegramFileUpload() {
 
   // ── STATE 3: Non-Blocking Streaming Slices with Flow Control & Checksums ──
   if (_uploadState == UPLOAD_STREAMING) {
+    if (_uploadType == UPLOAD_TYPE_FIRMWARE_OTA) {
+      if (!_uploadClient.connected() && !_uploadClient.available() && _uploadBytesSent < _uploadFileSize) {
+        Update.abort();
+        _uploadClient.stop();
+        _uploadState = UPLOAD_IDLE;
+        _uploadType = UPLOAD_TYPE_NONE;
+        sendTelegramReply("❌ OTA connection lost during flash! Aborted. Existing firmware intact.");
+        return;
+      }
+
+      uint8_t otaBuf[1024];
+      size_t avail = _uploadClient.available();
+      if (avail > 0) {
+        size_t toRead = (avail > sizeof(otaBuf)) ? sizeof(otaBuf) : avail;
+        int r = _uploadClient.read(otaBuf, toRead);
+        if (r > 0) {
+          if (Update.write(otaBuf, r) != (size_t)r) {
+            Update.abort();
+            _uploadClient.stop();
+            _uploadState = UPLOAD_IDLE;
+            _uploadType = UPLOAD_TYPE_NONE;
+            sendTelegramReply("❌ Flash write failed: " + String(Update.errorString()) + "\nOTA aborted.");
+            return;
+          }
+          _uploadBytesSent += r;
+          _uploadLastActivity = millis();
+
+          int pct = (_uploadFileSize > 0) ? (int)((float)_uploadBytesSent * 100.0f / (float)_uploadFileSize) : 0;
+          if (pct >= 25 && _uploadLastProgressPct < 25) {
+            _uploadLastProgressPct = 25;
+            sendTelegramReply("⏳ Flashing Firmware: 25% (" + String(_uploadBytesSent / 1024) + "/" + String(_uploadFileSize / 1024) + " KB)...");
+          } else if (pct >= 50 && _uploadLastProgressPct < 50) {
+            _uploadLastProgressPct = 50;
+            sendTelegramReply("⏳ Flashing Firmware: 50% (" + String(_uploadBytesSent / 1024) + "/" + String(_uploadFileSize / 1024) + " KB)...");
+          } else if (pct >= 75 && _uploadLastProgressPct < 75) {
+            _uploadLastProgressPct = 75;
+            sendTelegramReply("⏳ Flashing Firmware: 75% (" + String(_uploadBytesSent / 1024) + "/" + String(_uploadFileSize / 1024) + " KB)...");
+          }
+        }
+      }
+
+      if (_uploadFileSize > 0 && _uploadBytesSent >= _uploadFileSize) {
+        _uploadClient.stop();
+        if (Update.end(true)) {
+          if (Update.isFinished()) {
+            _uploadState = UPLOAD_IDLE;
+            _uploadType = UPLOAD_TYPE_NONE;
+            sendTelegramReply("✅ Firmware Updated Successfully!\n\n📦 Size: " + String(_uploadFileSize / 1024) + " KB\n🛡️ Verified OTA partition.\n🔄 Rebooting ESP3D into new firmware in 2 seconds...");
+            delay(2000);
+            ESP.restart();
+            return;
+          }
+        }
+        Update.abort();
+        _uploadState = UPLOAD_IDLE;
+        _uploadType = UPLOAD_TYPE_NONE;
+        sendTelegramReply("❌ Firmware verification failed: " + String(Update.errorString()) + "\nExisting firmware intact.");
+        return;
+      }
+      return;
+    }
+
     // Check if entire file has been downloaded from Telegram
     bool downloadComplete = (_uploadFileSize > 0 && _uploadBytesSent >= _uploadFileSize);
 
@@ -1203,12 +1424,51 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
   String lc = cmd;
   lc.toLowerCase();
 
+  // Button & emoji aliases
+  if (lc == "📊 status" || lc == "status") lc = "/status";
+  else if (lc == "📁 files" || lc == "files" || lc == "📁 sd files" || lc == "/sd") lc = "/files";
+  else if (lc == "⏸️ pause" || lc == "pause") lc = "/pause";
+  else if (lc == "▶️ resume" || lc == "resume") lc = "/resume";
+  else if (lc == "⏹️ stop" || lc == "stop") lc = "/stop";
+  else if (lc == "ℹ️ info" || lc == "info") lc = "/info";
+  else if (lc == "❓ help" || lc == "help") lc = "/help";
+
+  // ── Start / Welcome Command ──
+  if (lc == "/start") {
+    String welcome = "👋 Welcome to ESP3D Enhanced Telegram Bot!\n\n"
+                     "Your 3D printer remote controller is active.\n"
+                     "Tap any button below or send a command to get started.\n\n"
+                     "📁 Send any .gcode file to upload to SD card.\n"
+                     "⚡ Send any .bin file to flash firmware wirelessly (OTA).";
+    sendTelegramMessage(welcome, getReplyKeyboardMarkup());
+    return;
+  }
+
+  // ── OTA Help / Instructions ──
+  if (lc == "/ota" || lc == "/update") {
+    sendTelegramReply("⚡ Over-The-Air (OTA) Firmware Flashing:\n\nSimply send or drag-and-drop your compiled .bin file (e.g. firmware.bin) into this chat!\n\nThe bot will automatically receive, verify, and flash the ESP32 OTA partition wirelessly.");
+    return;
+  }
+
+  // ── ESP3D Controller Reboot ──
+  if (lc == "/reboot_esp" || lc == "/restart_esp") {
+    sendTelegramReply("🔄 Rebooting ESP3D controller in 1 second...");
+    delay(1000);
+    ESP.restart();
+    return;
+  }
+
   // ── Emergency Stop (Always allowed) ──
   if (lc == "/emergency") {
     if (_uploadState != UPLOAD_IDLE) {
-      sendUploadSerial("\nM29\n");
+      if (_uploadType == UPLOAD_TYPE_FIRMWARE_OTA) {
+        Update.abort();
+      } else {
+        sendUploadSerial("\nM29\n");
+      }
       _uploadClient.stop();
       _uploadState = UPLOAD_IDLE;
+      _uploadType = UPLOAD_TYPE_NONE;
     }
     esp3d_serial_service.writeBytes((const uint8_t*)"M112\n", 5);
     _isKilled = true;
@@ -1217,6 +1477,11 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     _wasPrinting = false;
     _autoBreakWaits = false;
     _autoBreakCount = 0;
+    _notifiedLayer1 = false;
+    _notifiedMilestone25 = false;
+    _notifiedMilestone50 = false;
+    _notifiedMilestone75 = false;
+    _waitingBedCooldown = false;
     _marlinPrompt = "PRINTER HALTED - Please Reset";
     sendTelegramReply("🚨 EMERGENCY STOP (M112 sent)!\n\nAll motors and heaters killed immediately.\n⚠️ Marlin CPU is permanently HALTED for safety.\n\n👉 To recover:\n1. Turn the printer's power switch OFF.\n2. Wait 5 seconds.\n3. Turn the switch back ON.\n\nThe bot will automatically detect the reboot and notify you!");
     return;
@@ -1319,24 +1584,22 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     esp3d_serial_service.writeBytes((const uint8_t*)"M21\nM20\n", 8);
     return;
   }
-  else if (lc == "/help" || lc == "/start") {
-    String msg = "🎮 3D Printer Remote Control\n\n";
-    msg += "📊 MONITORING & DIAGNOSTICS:\n";
-    msg += "/status — Live progress & temps\n";
-    msg += "/info — Complete printer hardware info\n";
-    msg += "/temp — Check temperatures\n";
-    msg += "/pos — Toolhead coordinates\n";
-    msg += "/display — LCD info & prompts\n";
-    msg += "/files — Browse SD card files\n";
-    msg += "/check — Test printer connection\n\n";
-    msg += "⏯️ PRINT CONTROL:\n";
-    msg += "/pause — Pause print safely\n";
+  else if (lc == "/help") {
+    String msg = "🤖 ESP3D REMOTE COMMANDS:\n\n";
+    msg += "📊 STATUS & TELEMETRY:\n";
+    msg += "/status — Live print status & temperatures\n";
+    msg += "/temp — Hotend and bed temperatures\n";
+    msg += "/pos — Tool head X/Y/Z/E coordinates\n";
+    msg += "/display — Marlin LCD simulated screen\n";
+    msg += "/info — Complete machine diagnostics\n\n";
+    msg += "🎛️ CONTROL:\n";
+    msg += "/pause — Pause print & park nozzle\n";
     msg += "/resume — Resume print\n";
-    msg += "/stop — Cancel print & cool down\n";
-    msg += "/continue — Select 'Continue'\n";
-    msg += "/purge — Select 'Purge More'\n";
-    msg += "/emergency — 🚨 Instant kill stop\n\n";
-    msg += "⚡ LIVE TUNING:\n";
+    msg += "/stop — Cancel print & turn off heaters\n";
+    msg += "/continue — Select 'Continue' on prompt\n";
+    msg += "/purge — Select 'Purge More' on prompt\n";
+    msg += "/emergency — 🚨 Instant kill stop (M112)\n\n";
+    msg += "🏎️ LIVE TUNING:\n";
     msg += "/speed 120 — Set speed (10-300%)\n";
     msg += "/flow 100 — Set flow (50-150%)\n";
     msg += "/fan 100 — Set cooling fan (0-100%)\n";
@@ -1347,24 +1610,23 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     msg += "/cooldown — Turn off heaters\n";
     msg += "/hotend 200 — Set hotend temp\n";
     msg += "/bed 60 — Set bed temp\n\n";
-    msg += "🧵 FILAMENT (Idle or Paused):\n";
+    msg += "🧵 FILAMENT:\n";
     msg += "/load — Extrude 60mm\n";
     msg += "/unload — Retract 430mm\n\n";
     msg += "🧭 MOTION:\n";
     msg += "/home_all — Home all axes\n";
-    msg += "/home_x — Home X axis\n";
-    msg += "/home_y — Home Y axis\n";
-    msg += "/home_z — Home Z axis\n\n";
+    msg += "/home_x, /home_y, /home_z\n\n";
     msg += "📁 FILE MANAGEMENT:\n";
     msg += "/files — Browse SD card files\n";
     msg += "/print_1 — Print file by number\n";
     msg += "/del_1 — Delete file by number\n";
-    msg += "/delete <file> — Delete by filename\n";
-    msg += "Send any .gcode to chat to upload to SD!\n\n";
+    msg += "📤 Send any .gcode to chat to upload to SD!\n\n";
+    msg += "⚡ OTA WIRELESS FLASHING:\n";
+    msg += "📥 Send any .bin file to flash ESP3D firmware OTA!\n\n";
     msg += "🔄 RECOVERY:\n";
-    msg += "/reboot — Test/restart (M999)\n";
-    msg += "Power switch OFF->ON to reset halt";
-    sendTelegramReply(msg);
+    msg += "/reboot — Test/restart Marlin (M999)\n";
+    msg += "/reboot_esp — Restart ESP3D controller";
+    sendTelegramMessage(msg, getReplyKeyboardMarkup());
     return;
   }
 
@@ -1595,10 +1857,19 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
   // ── Stop (M876 S1 + M108 + M524 + Cooldown) ──
   else if (lc == "/stop") {
     if (_uploadState != UPLOAD_IDLE) {
-      sendUploadSerial("\nM29\n");
-      _uploadClient.stop();
-      _uploadState = UPLOAD_IDLE;
-      sendTelegramReply("Upload cancelled and SD file closed.");
+      if (_uploadType == UPLOAD_TYPE_FIRMWARE_OTA) {
+        Update.abort();
+        _uploadClient.stop();
+        _uploadState = UPLOAD_IDLE;
+        _uploadType = UPLOAD_TYPE_NONE;
+        sendTelegramReply("🛑 Firmware OTA flash aborted by user.");
+      } else {
+        sendUploadSerial("\nM29\n");
+        _uploadClient.stop();
+        _uploadState = UPLOAD_IDLE;
+        _uploadType = UPLOAD_TYPE_NONE;
+        sendTelegramReply("Upload cancelled and SD file closed.");
+      }
       return;
     }
     if (!_isPrinting && !_isPaused) {
@@ -1613,6 +1884,11 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     _isPaused = false;
     _isPrinting = false;
     _wasPrinting = false;
+    _notifiedLayer1 = false;
+    _notifiedMilestone25 = false;
+    _notifiedMilestone50 = false;
+    _notifiedMilestone75 = false;
+    _waitingBedCooldown = false;
     _progress = 0;
     _marlinPrompt = "";
     _marlinWaitingForUser = false;
@@ -1790,6 +2066,43 @@ void TelegramMonitor::pollTelegramUpdates() {
       }
     }
 
+    // Extract callback query (inline keyboard button clicks)
+    int cbIdx = chunk.indexOf("\"callback_query\":{");
+    if (cbIdx >= 0) {
+      String cbFromId = "";
+      int cbFromPos = chunk.indexOf("\"from\":{", cbIdx);
+      if (cbFromPos >= 0) {
+        int ip = chunk.indexOf("\"id\":", cbFromPos);
+        if (ip >= 0) {
+          int s = ip + 5, e = s;
+          while (e < (int)chunk.length() && (isDigit(chunk.charAt(e)) || chunk.charAt(e) == '-')) e++;
+          cbFromId = chunk.substring(s, e);
+        }
+      }
+
+      String cbId = "";
+      int idPos = chunk.indexOf("\"id\":\"", cbIdx);
+      if (idPos >= 0) {
+        int s = idPos + 6, e = chunk.indexOf('"', s);
+        if (e > s) cbId = chunk.substring(s, e);
+      }
+
+      String cbData = "";
+      int dataPos = chunk.indexOf("\"data\":\"", cbIdx);
+      if (dataPos >= 0) {
+        int s = dataPos + 8, e = chunk.indexOf('"', s);
+        if (e > s) cbData = chunk.substring(s, e);
+      }
+
+      if (!_skipFirstPoll && cbData.length() > 0) {
+        _pendingCommand = cbData;
+        _pendingFromId = cbFromId;
+        if (cbId.length() > 0) {
+          answerCallbackQuery(cbId);
+        }
+      }
+    }
+
     // Extract text command
     int tp = chunk.indexOf("\"text\":\"");
     if (tp >= 0) {
@@ -1803,7 +2116,7 @@ void TelegramMonitor::pollTelegramUpdates() {
       }
     }
 
-    // Extract document upload (G-code file sent via Telegram)
+    // Extract document upload (G-code file or .bin firmware file sent via Telegram)
     int docIdx = chunk.indexOf("\"document\":{");
     if (docIdx >= 0) {
       String fid = "", fname = "";
@@ -1835,12 +2148,20 @@ void TelegramMonitor::pollTelegramUpdates() {
         } else {
           String fnLower = fname;
           fnLower.toLowerCase();
-          if (!fnLower.endsWith(".gcode") && !fnLower.endsWith(".gco") && !fnLower.endsWith(".g")) {
-            sendTelegramReply("❌ Invalid file format!\nPlease send a .gcode file to save to the SD card.");
-          } else if (fsize > 20000000) {
-            sendTelegramReply("⚠️ File too large (" + String(fsize / 1024) + " KB)!\nTelegram Cloud limits bot file downloads to 20 MB.");
+          if (fnLower.endsWith(".bin")) {
+            if (fsize > 1900000) {
+              sendTelegramReply("⚠️ Firmware file too large (" + String(fsize / 1024) + " KB)!\nESP32 OTA partition limit is 1,920 KB.");
+            } else {
+              startFirmwareOtaUpload(fid, fname, fsize);
+            }
+          } else if (fnLower.endsWith(".gcode") || fnLower.endsWith(".gco") || fnLower.endsWith(".g")) {
+            if (fsize > 20000000) {
+              sendTelegramReply("⚠️ File too large (" + String(fsize / 1024) + " KB)!\nTelegram Cloud limits bot file downloads to 20 MB.");
+            } else {
+              startFileUpload(fid, fname, fsize);
+            }
           } else {
-            startFileUpload(fid, fname, fsize);
+            sendTelegramReply("❌ Invalid file format!\nSend a .gcode file to print or a .bin file to update firmware.");
           }
         }
       }
@@ -1961,14 +2282,85 @@ void TelegramMonitor::handle() {
     _wasPrinting = true;
     _currentLayer = 0;
     _totalLayers = 0;
+    _notifiedLayer1 = false;
+    _notifiedMilestone25 = false;
+    _notifiedMilestone50 = false;
+    _notifiedMilestone75 = false;
+    _waitingBedCooldown = false;
     esp3d_serial_service.writeBytes((const uint8_t*)"M27 C\n", 6);
     esp3d_serial_service.writeBytes((const uint8_t*)"M31\n", 4);
   }
 
-  // 8. Detect print finished (only when NOT paused, NOT auto-breaking, NOT killed)
+  // 8. Milestone and Layer alerts while printing
+  if (_isPrinting && !_isPaused && !_isKilled) {
+    // Layer 1 Finished (Layer 2 Started)
+    if (!_notifiedLayer1 && _currentLayer >= 2) {
+      _notifiedLayer1 = true;
+      String m = "🎯 Layer 1 Finished! (Layer 2 Started)\n";
+      if (_fileName.length() > 0) m += "File: " + _fileName + "\n";
+      m += "Hotend: " + String(_hotendActual, 0) + "/" + String(_hotendTarget, 0) + "°C\n";
+      m += "Bed: " + String(_bedActual, 0) + "/" + String(_bedTarget, 0) + "°C\n";
+      if (_zHeight > 0.0) m += "Z-Height: " + String(_zHeight, 2) + " mm\n";
+      m += "\n💡 First layer is complete! Please inspect bed adhesion and layer squish.";
+      sendTelegramMessage(m, getPrintingMarkup());
+    }
+
+    // 25% Progress Milestone
+    if (!_notifiedMilestone25 && _progress >= 25.0) {
+      _notifiedMilestone25 = true;
+      uint32_t elapsed = parseElapsedSeconds(_printTime);
+      String timeLeft = (elapsed > 10) ? formatTime((uint32_t)((float)elapsed / (_progress / 100.0) - elapsed)) : "...";
+      String m = "⏳ Milestone: 25% Complete!\n";
+      if (_fileName.length() > 0) m += "File: " + _fileName + "\n";
+      m += buildProgressBar(_progress) + " " + String(_progress, 1) + "%\n";
+      if (_currentLayer > 0) m += "Layer: " + String(_currentLayer) + " / " + String(_totalLayers) + "\n";
+      if (_printTime.length() > 0) m += "Elapsed: " + _printTime + " | Left: ~" + timeLeft + "\n";
+      sendTelegramMessage(m, getPrintingMarkup());
+    }
+
+    // 50% Progress Milestone (Halfway)
+    if (!_notifiedMilestone50 && _progress >= 50.0) {
+      _notifiedMilestone50 = true;
+      uint32_t elapsed = parseElapsedSeconds(_printTime);
+      String timeLeft = (elapsed > 10) ? formatTime((uint32_t)((float)elapsed / (_progress / 100.0) - elapsed)) : "...";
+      String m = "⏳ Milestone: 50% Complete (Halfway)!\n";
+      if (_fileName.length() > 0) m += "File: " + _fileName + "\n";
+      m += buildProgressBar(_progress) + " " + String(_progress, 1) + "%\n";
+      if (_currentLayer > 0) m += "Layer: " + String(_currentLayer) + " / " + String(_totalLayers) + "\n";
+      if (_printTime.length() > 0) m += "Elapsed: " + _printTime + " | Left: ~" + timeLeft + "\n";
+      sendTelegramMessage(m, getPrintingMarkup());
+    }
+
+    // 75% Progress Milestone (Home stretch)
+    if (!_notifiedMilestone75 && _progress >= 75.0) {
+      _notifiedMilestone75 = true;
+      uint32_t elapsed = parseElapsedSeconds(_printTime);
+      String timeLeft = (elapsed > 10) ? formatTime((uint32_t)((float)elapsed / (_progress / 100.0) - elapsed)) : "...";
+      String m = "⏳ Milestone: 75% Complete (Home stretch)!\n";
+      if (_fileName.length() > 0) m += "File: " + _fileName + "\n";
+      m += buildProgressBar(_progress) + " " + String(_progress, 1) + "%\n";
+      if (_currentLayer > 0) m += "Layer: " + String(_currentLayer) + " / " + String(_totalLayers) + "\n";
+      if (_printTime.length() > 0) m += "Elapsed: " + _printTime + " | Left: ~" + timeLeft + "\n";
+      sendTelegramMessage(m, getPrintingMarkup());
+    }
+  }
+
+  // 9. Safe Bed Cooldown check after print finishes
+  if (_waitingBedCooldown && !_isPrinting && !_isPaused && !_isKilled) {
+    if (_bedActual > 0.0 && _bedActual <= 42.0 && _bedTarget == 0.0) {
+      _waitingBedCooldown = false;
+      String m = "❄️ Bed Cooled Down!\n\n"
+                 "Bed temperature is now " + String(_bedActual, 1) + "°C (target 0°C).\n"
+                 "Part can now be safely removed from the build plate without warping.";
+      sendTelegramMessage(m, getIdleMarkup());
+    }
+  }
+
+  // 10. Detect print finished (only when NOT paused, NOT auto-breaking, NOT killed)
   if (!_isPrinting && !_isPaused && !_autoBreakWaits && !_isKilled && _wasPrinting) {
     sendPrintFinished();
     _wasPrinting = false;
+    _waitingBedCooldown = true;
     _progress = 0;
     _currentLayer = 0;
     _totalLayers = 0;
@@ -1978,13 +2370,13 @@ void TelegramMonitor::handle() {
     _lastIdleUpdateTime = now;
   }
 
-  // 9. Periodic print update (every 1 minute)
+  // 11. Periodic print update (every 1 minute)
   if ((_isPrinting || _isPaused) && !_isKilled && (now - _lastPrintUpdateTime >= TELEGRAM_PRINT_INTERVAL)) {
     sendStatusUpdate();
     _lastPrintUpdateTime = now;
   }
 
-  // 10. Periodic idle update (every 5 minutes)
+  // 12. Periodic idle update (every 5 minutes)
   if (!_isPrinting && !_isPaused && !_autoBreakWaits && !_isKilled && (now - _lastIdleUpdateTime >= TELEGRAM_IDLE_INTERVAL)) {
     sendIdleStatus();
     _lastIdleUpdateTime = now;
