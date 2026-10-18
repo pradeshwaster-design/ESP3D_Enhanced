@@ -208,12 +208,7 @@ void ESP3DSerialService::flushData(const uint8_t *data, size_t size, ESP3DMessag
   // Feed incoming Marlin data to the telegram monitor for parsing
 #if defined(NOTIFICATION_FEATURE)
   if (_id == MAIN_SERIAL && type == ESP3DMessageType::unique && size > 0) {
-    // Make a null-terminated copy for parsing
-    char tmpBuf[256];
-    size_t copyLen = (size < 255) ? size : 255;
-    memcpy(tmpBuf, data, copyLen);
-    tmpBuf[copyLen] = '\0';
-    telegram_monitor.parseSerialData(tmpBuf);
+    telegram_monitor.parseSerialData(data, size);
   }
 #endif  // NOTIFICATION_FEATURE
 

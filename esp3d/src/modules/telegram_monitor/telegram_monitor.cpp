@@ -2,10 +2,23 @@
   telegram_monitor.cpp - 2-Way Interactive Telegram Monitor & Remote Control
 
   Features:
-  - 2-Way Telegram Bot: receives & executes /status, /pause, /resume, /stop, /emergency, /temp, /cooldown, /help
-  - Periodic print status updates every 1 minute
-  - Periodic idle status updates every 5 minutes
-  - Instant print start and print finish notifications
+  - 2-Way Telegram Bot:
+      /status     - Live print progress & stats
+      /pause      - Pause print (M25)
+      /resume     - Resume print (M24)
+      /stop       - Cancel print (M524)
+      /emergency  - Emergency kill stop (M112)
+      /temp       - Check hotend & bed temperatures
+      /cooldown   - Turn off all heaters
+      /pos        - Tool head position (X, Y, Z, E)
+      /home       - Home axes (G28)
+      /display    - Printer LCD screen info & speeds
+      /files      - List SD card files with numbers
+      /print <n>  - Select file & start printing
+      /help       - Show all available commands
+  - Periodic print updates every 1 minute
+  - Periodic idle updates every 5 minutes
+  - Instant print start & finish alerts
 */
 
 #include "../../include/esp3d_config.h"
@@ -24,7 +37,10 @@ TelegramMonitor::TelegramMonitor() {
   _lastIdleUpdateTime = 0;
   _lastPollTime = 0;
   _lastTelegramPollTime = 0;
+  _filesRequestTime = 0;
   _lastUpdateId = 0;
+  _pendingCommand = "";
+  _pendingFromId = "";
   _isPrinting = false;
   _wasPrinting = false;
   _fileName = "Unknown";
@@ -35,8 +51,18 @@ TelegramMonitor::TelegramMonitor() {
   _progress = 0;
   _bytesDone = 0;
   _bytesTotal = 0;
+  _posX = 0;
+  _posY = 0;
   _zHeight = 0;
+  _posE = 0;
+  _feedrate = 100;
+  _flowrate = 100;
+  _lcdMessage = "Ready";
   _printTime = "0s";
+  _sdFileCount = 0;
+  _collectingFiles = false;
+  _pendingFilesRequest = false;
+  _readyToSendFileList = false;
 }
 
 void TelegramMonitor::begin() {
@@ -46,7 +72,14 @@ void TelegramMonitor::begin() {
   _lastIdleUpdateTime = now;
   _lastPollTime = now;
   _lastTelegramPollTime = now;
+  _filesRequestTime = 0;
   _lastUpdateId = 0;
+  _pendingCommand = "";
+  _pendingFromId = "";
+  _sdFileCount = 0;
+  _collectingFiles = false;
+  _pendingFilesRequest = false;
+  _readyToSendFileList = false;
 }
 
 // ── Time helper functions ────────────────────────────────
@@ -90,13 +123,38 @@ static String formatTime(uint32_t sec) {
   return res;
 }
 
-// ── Parse incoming serial lines from Marlin ──────────────
-void TelegramMonitor::parseSerialData(const char* line) {
-  if (!_started || !line) return;
+// ── Split serial chunk into lines and parse each line ───
+void TelegramMonitor::parseSerialData(const uint8_t* data, size_t size) {
+  if (!_started || !data || size == 0) return;
+
+  const char* p = (const char*)data;
+  const char* end = p + size;
+  while (p < end) {
+    const char* start = p;
+    while (p < end && *p != '\n' && *p != '\r') {
+      p++;
+    }
+    size_t len = p - start;
+    if (len > 0 && len < 256) {
+      char lineBuf[256];
+      memcpy(lineBuf, start, len);
+      lineBuf[len] = '\0';
+      parseSingleLine(lineBuf);
+    }
+    while (p < end && (*p == '\r' || *p == '\n')) {
+      p++;
+    }
+  }
+}
+
+// ── Parse a single line from Marlin ──────────────────────
+void TelegramMonitor::parseSingleLine(const char* line) {
+  if (!line || strlen(line) == 0) return;
 
   String data = String(line);
+  data.trim();
 
-  // Parse temperature: " T:200.00 /200.00 B:50.00 /50.00"
+  // 1. Parse temperature: "T:200.00 /200.00 B:50.00 /50.00"
   int tPos = data.indexOf("T:");
   if (tPos >= 0) {
     int slashPos = data.indexOf('/', tPos);
@@ -125,28 +183,49 @@ void TelegramMonitor::parseSerialData(const char* line) {
     }
   }
 
-  // Parse filename from: "Current file: filename.gcode"
-  int cfPos = data.indexOf("Current file: ");
-  if (cfPos >= 0) {
-    int endPos = data.indexOf('\r', cfPos);
-    if (endPos < 0) endPos = data.indexOf('\n', cfPos);
+  // 2. Parse positions: "X:0.00 Y:235.00 Z:50.20 E:337.83"
+  int xPos = data.indexOf("X:");
+  if (xPos >= 0) {
+    int endPos = data.indexOf(' ', xPos + 2);
+    if (endPos > xPos + 2) {
+      _posX = data.substring(xPos + 2, endPos).toFloat();
+    }
+  }
+  int yPos = data.indexOf("Y:");
+  if (yPos >= 0) {
+    int endPos = data.indexOf(' ', yPos + 2);
+    if (endPos > yPos + 2) {
+      _posY = data.substring(yPos + 2, endPos).toFloat();
+    }
+  }
+  int zPos = data.indexOf("Z:");
+  if (zPos >= 0) {
+    int endPos = data.indexOf(' ', zPos + 2);
     if (endPos < 0) endPos = data.length();
-    _fileName = data.substring(cfPos + 14, endPos);
-    _fileName.trim();
+    _zHeight = data.substring(zPos + 2, endPos).toFloat();
+  }
+  int ePos = data.indexOf("E:");
+  if (ePos >= 0) {
+    int endPos = data.indexOf(' ', ePos + 2);
+    if (endPos < 0) endPos = data.length();
+    _posE = data.substring(ePos + 2, endPos).toFloat();
   }
 
-  // Parse filename from: "File opened: filename.gcode Size: ..."
+  // 3. Parse filename
+  int cfPos = data.indexOf("Current file: ");
+  if (cfPos >= 0) {
+    _fileName = data.substring(cfPos + 14);
+    _fileName.trim();
+  }
   int foPos = data.indexOf("File opened: ");
   if (foPos >= 0) {
     int spPos = data.indexOf(' ', foPos + 13);
-    if (spPos < 0) spPos = data.indexOf('\r', foPos);
-    if (spPos < 0) spPos = data.indexOf('\n', foPos);
     if (spPos < 0) spPos = data.length();
     _fileName = data.substring(foPos + 13, spPos);
     _fileName.trim();
   }
 
-  // Parse SD progress: "SD printing byte 818544/2344893"
+  // 4. Parse SD progress: "SD printing byte 818544/2344893"
   int sdPos = data.indexOf("SD printing byte ");
   if (sdPos >= 0) {
     int numStart = sdPos + 17;
@@ -165,44 +244,73 @@ void TelegramMonitor::parseSerialData(const char* line) {
     }
   }
 
-  // Also check "printing <filename> byte <done>/<total>"
-  int prPos = data.indexOf("printing ");
-  if (prPos >= 0 && sdPos < 0) {
-    int bytePos = data.indexOf(" byte ", prPos);
-    if (bytePos > prPos + 9) {
-      _fileName = data.substring(prPos + 9, bytePos);
-      _fileName.trim();
-    }
-  }
-
-  // Detect "Not SD printing"
   if (data.indexOf("Not SD printing") >= 0) {
     _isPrinting = false;
   }
 
-  // Parse Z position: "Z:10.80"
-  int zPos = data.indexOf("Z:");
-  if (zPos >= 0) {
-    int endPos = zPos + 2;
-    while (endPos < (int)data.length() &&
-           (isDigit(data.charAt(endPos)) || data.charAt(endPos) == '.')) {
-      endPos++;
-    }
-    if (endPos > zPos + 2) {
-      _zHeight = data.substring(zPos + 2, endPos).toFloat();
-    }
-  }
-
-  // Parse print time: "echo:Print time: 53m 52s"
+  // 5. Parse print time: "echo:Print time: 53m 52s"
   int ptPos = data.indexOf("Print time: ");
   if (ptPos >= 0) {
-    int endPos = data.indexOf('\r', ptPos);
-    if (endPos < 0) endPos = data.indexOf('\n', ptPos);
-    if (endPos < 0) endPos = data.length();
-    _printTime = data.substring(ptPos + 12, endPos);
+    _printTime = data.substring(ptPos + 12);
     _printTime.trim();
     if (_printTime.length() > 20) {
       _printTime = _printTime.substring(0, 20);
+    }
+  }
+
+  // 6. Parse Speed / Feedrate & Flowrate: "FR:100%" "E0 Flow: 100%"
+  int frPos = data.indexOf("FR:");
+  if (frPos >= 0) {
+    int pctPos = data.indexOf('%', frPos);
+    if (pctPos > frPos + 3) {
+      _feedrate = data.substring(frPos + 3, pctPos).toInt();
+    }
+  }
+  int flPos = data.indexOf("Flow: ");
+  if (flPos < 0) flPos = data.indexOf("flow: ");
+  if (flPos >= 0) {
+    int pctPos = data.indexOf('%', flPos);
+    if (pctPos > flPos + 6) {
+      _flowrate = data.substring(flPos + 6, pctPos).toInt();
+    }
+  }
+
+  // 7. Parse LCD messages: "echo:M117 Message" or "//action:notification Message"
+  int m117Pos = data.indexOf("M117 ");
+  if (m117Pos >= 0) {
+    _lcdMessage = data.substring(m117Pos + 5);
+    _lcdMessage.trim();
+  }
+  int notifPos = data.indexOf("//action:notification ");
+  if (notifPos >= 0) {
+    _lcdMessage = data.substring(notifPos + 22);
+    _lcdMessage.trim();
+  }
+
+  // 8. Parse SD file list (from M20):
+  if (data.indexOf("Begin file list") >= 0) {
+    _collectingFiles = true;
+    _sdFileCount = 0;
+    return;
+  }
+  if (data.indexOf("End file list") >= 0) {
+    _collectingFiles = false;
+    if (_pendingFilesRequest) {
+      _readyToSendFileList = true;
+    }
+    return;
+  }
+  if (_collectingFiles) {
+    String fname = data;
+    fname.trim();
+    if (fname.length() > 0 && !fname.startsWith("ok") && !fname.startsWith("//") && !fname.startsWith("echo:")) {
+      int spaceIdx = fname.indexOf(' ');
+      if (spaceIdx > 0) {
+        fname = fname.substring(0, spaceIdx);
+      }
+      if (_sdFileCount < MAX_SD_FILES) {
+        _sdFiles[_sdFileCount++] = fname;
+      }
     }
   }
 }
@@ -286,6 +394,19 @@ void TelegramMonitor::sendTelegramReply(const String& text) {
   notificationsservice.sendMSG("ESP3D", text.c_str());
 }
 
+void TelegramMonitor::sendSDFileListReply() {
+  if (_sdFileCount == 0) {
+    sendTelegramReply("SD Card: No files found or card not inserted.");
+    return;
+  }
+  String msg = "SD Card Files (" + String(_sdFileCount) + "):\n\n";
+  for (uint8_t i = 0; i < _sdFileCount; i++) {
+    msg += String(i + 1) + ". " + _sdFiles[i] + "\n";
+  }
+  msg += "\nTo start printing, type:\n/print <number> (e.g. /print 1)\nor /print <filename>";
+  sendTelegramReply(msg);
+}
+
 // ── 2-Way Telegram Bot Command Processing ─────────────────
 void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
   const String& authChatId = notificationsservice.getToken2();
@@ -300,37 +421,119 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
   if (atIdx >= 0) {
     cmd = cmd.substring(0, atIdx);
   }
-  cmd.toLowerCase();
 
-  if (cmd == "/status") {
+  String lowerCmd = cmd;
+  lowerCmd.toLowerCase();
+
+  if (lowerCmd == "/status") {
     if (_isPrinting) {
       sendStatusUpdate();
     } else {
       sendIdleStatus();
     }
-  } else if (cmd == "/pause") {
+  } else if (lowerCmd == "/pause") {
     esp3d_serial_service.writeBytes((const uint8_t*)"M25\n", 4);
     sendTelegramReply("Print Paused (M25 sent)");
-  } else if (cmd == "/resume") {
+  } else if (lowerCmd == "/resume") {
     esp3d_serial_service.writeBytes((const uint8_t*)"M24\n", 4);
     sendTelegramReply("Print Resumed (M24 sent)");
-  } else if (cmd == "/stop") {
+  } else if (lowerCmd == "/stop") {
     esp3d_serial_service.writeBytes((const uint8_t*)"M524\n", 5);
     sendTelegramReply("Print Cancelled (M524 sent)");
-  } else if (cmd == "/emergency") {
+  } else if (lowerCmd == "/emergency") {
     esp3d_serial_service.writeBytes((const uint8_t*)"M112\n", 5);
     sendTelegramReply("EMERGENCY STOP! M112 issued. Motors and heaters shut down immediately!");
-  } else if (cmd == "/temp") {
+  } else if (lowerCmd == "/temp") {
     String msg = "Temperatures:\n";
     msg += "Hotend: " + String(_hotendActual, 1) + " / " + String(_hotendTarget, 0) + "C\n";
     msg += "Bed: " + String(_bedActual, 1) + " / " + String(_bedTarget, 0) + "C";
     sendTelegramReply(msg);
-  } else if (cmd == "/cooldown") {
+  } else if (lowerCmd == "/cooldown") {
     esp3d_serial_service.writeBytes((const uint8_t*)"M104 S0\nM140 S0\n", 16);
     sendTelegramReply("Cooldown: Hotend and Bed heaters turned OFF");
-  } else if (cmd == "/help" || cmd == "/start") {
+  } else if (lowerCmd == "/pos" || lowerCmd == "/position") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M114\n", 5);
+    String msg = "Tool Head Position:\n";
+    msg += "X: " + String(_posX, 2) + " mm\n";
+    msg += "Y: " + String(_posY, 2) + " mm\n";
+    msg += "Z: " + String(_zHeight, 2) + " mm\n";
+    msg += "E: " + String(_posE, 2) + " mm";
+    sendTelegramReply(msg);
+  } else if (lowerCmd == "/home") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"G28\n", 4);
+    sendTelegramReply("Homing all axes (G28 sent)");
+  } else if (lowerCmd == "/home x") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"G28 X\n", 6);
+    sendTelegramReply("Homing X axis (G28 X sent)");
+  } else if (lowerCmd == "/home y") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"G28 Y\n", 6);
+    sendTelegramReply("Homing Y axis (G28 Y sent)");
+  } else if (lowerCmd == "/home z") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"G28 Z\n", 6);
+    sendTelegramReply("Homing Z axis (G28 Z sent)");
+  } else if (lowerCmd == "/display" || lowerCmd == "/screen" || lowerCmd == "/lcd") {
+    String msg = "Printer Screen / Status:\n";
+    msg += "State: " + String(_isPrinting ? "Printing" : "Idle") + "\n";
+    if (_isPrinting) {
+      msg += "File: " + _fileName + "\n";
+      msg += "Progress: " + String(_progress, 1) + "%\n";
+      msg += "Elapsed: " + _printTime + "\n";
+    }
+    msg += "Hotend: " + String(_hotendActual, 0) + "/" + String(_hotendTarget, 0) + "C\n";
+    msg += "Bed: " + String(_bedActual, 0) + "/" + String(_bedTarget, 0) + "C\n";
+    msg += "Z: " + String(_zHeight, 2) + " mm\n";
+    msg += "Speed: " + String(_feedrate) + "% | Flow: " + String(_flowrate) + "%\n";
+    if (_lcdMessage.length() > 0 && _lcdMessage != "Ready") {
+      msg += "Message: " + _lcdMessage;
+    }
+    sendTelegramReply(msg);
+  } else if (lowerCmd == "/files" || lowerCmd == "/ls") {
+    _collectingFiles = false;
+    _sdFileCount = 0;
+    _pendingFilesRequest = true;
+    _filesRequestTime = millis();
+    esp3d_serial_service.writeBytes((const uint8_t*)"M21\nM20\n", 8);
+  } else if (lowerCmd.startsWith("/print")) {
+    String arg = cmd.substring(6);
+    arg.trim();
+    if (arg.length() == 0) {
+      sendTelegramReply("Please specify a file number or name.\nUsage: /print 1 or /print <filename>\nType /files to see list.");
+      return;
+    }
+
+    String selectedFile = "";
+    bool isNum = true;
+    for (size_t i = 0; i < arg.length(); i++) {
+      if (!isDigit(arg.charAt(i))) { isNum = false; break; }
+    }
+
+    if (isNum) {
+      int fileIdx = arg.toInt() - 1;
+      if (fileIdx >= 0 && fileIdx < _sdFileCount) {
+        selectedFile = _sdFiles[fileIdx];
+      } else {
+        sendTelegramReply("Invalid file number. Type /files to see available numbers.");
+        return;
+      }
+    } else {
+      selectedFile = arg;
+      selectedFile.toUpperCase();
+    }
+
+    String m23 = "M23 " + selectedFile + "\n";
+    esp3d_serial_service.writeBytes((const uint8_t*)m23.c_str(), m23.length());
+    esp3d_serial_service.writeBytes((const uint8_t*)"M24\n", 4);
+
+    _fileName = selectedFile;
+    sendTelegramReply("Starting print for: " + selectedFile + "\nM23 and M24 sent!");
+  } else if (lowerCmd == "/help" || lowerCmd == "/start") {
     String msg = "3D Printer Remote Control\n\n";
     msg += "/status - Live print progress and stats\n";
+    msg += "/pos - Tool head position (X, Y, Z, E)\n";
+    msg += "/home - Home all axes (G28)\n";
+    msg += "/display - Screen info, speeds and message\n";
+    msg += "/files - List SD card files\n";
+    msg += "/print <num|file> - Select and print file\n";
     msg += "/pause - Pause print (M25)\n";
     msg += "/resume - Resume print (M24)\n";
     msg += "/stop - Cancel print (M524)\n";
@@ -339,7 +542,7 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     msg += "/cooldown - Turn off heaters\n";
     msg += "/help - Show command list";
     sendTelegramReply(msg);
-  } else if (cmd.startsWith("/")) {
+  } else if (lowerCmd.startsWith("/")) {
     sendTelegramReply("Unknown command. Type /help to see all available commands.");
   }
 }
@@ -397,6 +600,7 @@ void TelegramMonitor::pollTelegramUpdates() {
       if (line.length() > 4096) break;
     }
   }
+  // Stop and disconnect client immediately before parsing and queueing commands!
   client.stop();
 
   if (!inBody || line.length() == 0) return;
@@ -441,7 +645,9 @@ void TelegramMonitor::pollTelegramUpdates() {
       int tEnd = updateChunk.indexOf('"', tStart);
       if (tEnd > tStart) {
         String cmdText = updateChunk.substring(tStart, tEnd);
-        processTelegramCommand(cmdText, fromId);
+        // Queue command to execute cleanly outside the polling connection
+        _pendingCommand = cmdText;
+        _pendingFromId = fromId;
       }
     }
 
@@ -455,13 +661,30 @@ void TelegramMonitor::handle() {
 
   uint32_t now = millis();
 
-  // 1. Check for incoming Telegram commands every 3.5 seconds
+  // 1. Execute any queued command (after polling SSL connection is 100% closed)
+  if (_pendingCommand.length() > 0) {
+    String cmd = _pendingCommand;
+    String fromId = _pendingFromId;
+    _pendingCommand = "";
+    _pendingFromId = "";
+    processTelegramCommand(cmd, fromId);
+  }
+
+  // 2. Check for incoming Telegram commands every 4 seconds
   if (now - _lastTelegramPollTime >= TELEGRAM_POLL_INTERVAL) {
     _lastTelegramPollTime = now;
     pollTelegramUpdates();
   }
 
-  // 2. Periodic polling to Marlin for filename, print time, and temps
+  // 3. Handle files request completion (when End file list received or on 4s timeout)
+  if (_pendingFilesRequest && (_readyToSendFileList || (now - _filesRequestTime >= 4000))) {
+    _pendingFilesRequest = false;
+    _readyToSendFileList = false;
+    _collectingFiles = false;
+    sendSDFileListReply();
+  }
+
+  // 4. Periodic polling to Marlin for filename, print time, pos, and temps
   if (_isPrinting) {
     if (now - _lastPollTime >= 12000) {
       _lastPollTime = now;
@@ -477,7 +700,7 @@ void TelegramMonitor::handle() {
     }
   }
 
-  // 3. Detect print started
+  // 5. Detect print started
   if (_isPrinting && !_wasPrinting) {
     sendPrintStarted();
     _lastPrintUpdateTime = now;
@@ -486,7 +709,7 @@ void TelegramMonitor::handle() {
     esp3d_serial_service.writeBytes((const uint8_t*)"M31\n", 4);
   }
 
-  // 4. Detect print finished
+  // 6. Detect print finished
   if (!_isPrinting && _wasPrinting) {
     sendPrintFinished();
     _wasPrinting = false;
@@ -496,13 +719,13 @@ void TelegramMonitor::handle() {
     _lastIdleUpdateTime = now;
   }
 
-  // 5. Periodic update while printing (every 1 minute)
+  // 7. Periodic update while printing (every 1 minute)
   if (_isPrinting && (now - _lastPrintUpdateTime >= TELEGRAM_PRINT_INTERVAL)) {
     sendStatusUpdate();
     _lastPrintUpdateTime = now;
   }
 
-  // 6. Periodic update while idle (every 5 minutes)
+  // 8. Periodic update while idle (every 5 minutes)
   if (!_isPrinting && (now - _lastIdleUpdateTime >= TELEGRAM_IDLE_INTERVAL)) {
     sendIdleStatus();
     _lastIdleUpdateTime = now;
