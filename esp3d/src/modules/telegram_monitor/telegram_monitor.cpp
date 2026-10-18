@@ -1,14 +1,19 @@
 /*
   telegram_monitor.cpp - 2-Way Interactive Telegram Monitor & Remote Control
 
-  Bug fixes applied:
-  1. Skip stale messages on boot (no double-reboot from old /files or /print)
-  2. Pause state tracking (_isPaused) - no false "Print Finished" on M25 pause
-  3. Correct Marlin commands: M108 to resume (breaks wait_for_user), M108+M524 to stop
-  4. All network calls deferred to handle() - never called from serial ISR
-  5. Proper line-by-line serial parsing with size-aware buffer
-  6. Detection of "busy: paused for user" keepalive from Marlin
-  7. URL-safe message content (& encoded in notifications_service.cpp)
+  V3 Bug fixes:
+  1. Auto-break Marlin's MULTIPLE wait_for_user loops during resume
+     - After M25, Marlin's ADVANCED_PAUSE_FEATURE enters wait_for_user #1 ("Click to resume")
+     - M108 breaks it, but resume_print() then reheats, purges, and enters
+       wait_for_user #2 ("Purge More / Continue")
+     - This code auto-detects "busy: paused for user" and keeps sending M108
+       until the print actually resumes (SD progress detected)
+  2. Track Marlin's LCD prompt state via //action:prompt_* messages
+  3. Skip stale messages on boot (no double-reboot)
+  4. Pause state tracking - no false "Print Finished"
+  5. All network calls deferred to handle() - never from serial ISR
+  6. One network operation per handle() cycle for heap stability
+  7. URL-safe messages (encoded in notifications_service.cpp)
 */
 
 #include "../../include/esp3d_config.h"
@@ -50,6 +55,12 @@ TelegramMonitor::TelegramMonitor() {
   _feedrate = 100;
   _flowrate = 100;
   _printTime = "";
+  _autoBreakWaits = false;
+  _autoBreakCount = 0;
+  _lastAutoM108Time = 0;
+  _needAutoM108 = false;
+  _marlinWaitingForUser = false;
+  _marlinPrompt = "";
   _sdFileCount = 0;
   _collectingFiles = false;
   _pendingFilesRequest = false;
@@ -69,6 +80,12 @@ void TelegramMonitor::begin() {
   _pendingCommand = "";
   _pendingFromId = "";
   _isPaused = false;
+  _autoBreakWaits = false;
+  _autoBreakCount = 0;
+  _lastAutoM108Time = 0;
+  _needAutoM108 = false;
+  _marlinWaitingForUser = false;
+  _marlinPrompt = "";
   _sdFileCount = 0;
   _collectingFiles = false;
   _pendingFilesRequest = false;
@@ -186,18 +203,22 @@ void TelegramMonitor::parseSingleLine(const char* line) {
       if (_bytesTotal > 0) {
         _progress = ((float)_bytesDone / (float)_bytesTotal) * 100.0;
         _isPrinting = true;
-        _isPaused = false;  // If we see SD progress, we are definitely not paused
+        // Seeing SD progress = definitely running, not paused
+        _isPaused = false;
+        _autoBreakWaits = false;
+        _autoBreakCount = 0;
+        _marlinWaitingForUser = false;
+        _marlinPrompt = "";
       }
     }
   }
 
   // --- "Not SD printing" ---
-  // BUG FIX #3: Only mark as not-printing if we are NOT paused
+  // Only mark as not-printing if we are NOT paused and NOT trying to resume
   if (d.indexOf("Not SD printing") >= 0) {
-    if (!_isPaused) {
+    if (!_isPaused && !_autoBreakWaits) {
       _isPrinting = false;
     }
-    // If paused, ignore this — Marlin sends "Not SD printing" while paused
   }
 
   // --- Print time: "echo:Print time: 53m 52s" ---
@@ -223,22 +244,72 @@ void TelegramMonitor::parseSingleLine(const char* line) {
     if (pp > flP + 6) _flowrate = d.substring(flP + 6, pp).toInt();
   }
 
-  // --- BUG FIX #7: Detect "busy: paused for user" keepalive ---
+  // ──────────────────────────────────────────────────────
+  // CRITICAL: Marlin keepalive "busy: paused for user"
+  // Sent every 2s while Marlin is blocked in wait_for_user
+  // This happens TWICE during resume: once for initial pause,
+  // once for "Purge More / Continue" prompt
+  // ──────────────────────────────────────────────────────
   if (d.indexOf("paused for user") >= 0) {
+    _marlinWaitingForUser = true;
     _isPaused = true;
-    _isPrinting = true;  // Still considered "printing" (just paused)
+    _isPrinting = true;  // Still "printing" (just paused)
+    // If we're trying to auto-break waits, flag for M108 in handle()
+    // NEVER send writeBytes from here (serial ISR context!)
+    if (_autoBreakWaits && _autoBreakCount > 0) {
+      _needAutoM108 = true;
+    }
   }
 
-  // --- Detect action:paused from host action ---
-  if (d.indexOf("//action:paused") >= 0 || d.indexOf("//action:pause") >= 0) {
-    _isPaused = true;
-    _isPrinting = true;
+  // --- "busy: processing" = Marlin is busy but NOT waiting for user ---
+  if (d.indexOf("busy: processing") >= 0) {
+    _marlinWaitingForUser = false;
+    // During resume, "busy: processing" means Marlin is reheating/moving
+    // Don't clear _autoBreakWaits - still might need M108 for purge prompt
   }
 
-  // --- Detect resume from action ---
-  if (d.indexOf("//action:resumed") >= 0 || d.indexOf("//action:resume") >= 0) {
-    _isPaused = false;
-    _isPrinting = true;
+  // --- Host action messages (//action:*) ---
+  // These tell us what Marlin's LCD is showing
+  if (d.startsWith("//action:")) {
+    String action = d.substring(9);
+    action.trim();
+
+    // Track prompt for /display command
+    if (action.startsWith("prompt_begin ")) {
+      _marlinPrompt = action.substring(13);
+      _marlinPrompt.trim();
+    }
+    else if (action.startsWith("prompt_button ")) {
+      // Append button options to prompt
+      String btn = action.substring(14);
+      btn.trim();
+      if (_marlinPrompt.length() > 0) {
+        _marlinPrompt += " | " + btn;
+      }
+    }
+    else if (action == "prompt_end") {
+      _marlinPrompt = "";
+    }
+    else if (action == "paused" || action == "pause") {
+      _isPaused = true;
+      _isPrinting = true;
+    }
+    else if (action == "resumed" || action == "resume") {
+      _isPaused = false;
+      _isPrinting = true;
+      _autoBreakWaits = false;
+      _autoBreakCount = 0;
+      _marlinWaitingForUser = false;
+      _marlinPrompt = "";
+    }
+    else if (action == "cancel") {
+      _isPaused = false;
+      _isPrinting = false;
+      _autoBreakWaits = false;
+      _autoBreakCount = 0;
+      _marlinWaitingForUser = false;
+      _marlinPrompt = "";
+    }
   }
 
   // --- SD file list (from M20): ---
@@ -250,7 +321,7 @@ void TelegramMonitor::parseSingleLine(const char* line) {
   if (d.indexOf("End file list") >= 0) {
     _collectingFiles = false;
     if (_pendingFilesRequest) {
-      _readyToSendFileList = true;  // Deferred to handle() — NEVER call network from ISR
+      _readyToSendFileList = true;  // Deferred to handle()
     }
     return;
   }
@@ -283,7 +354,15 @@ void TelegramMonitor::sendStatusUpdate() {
   String msg = "Print Status\n";
   if (_fileName.length() > 0) msg += "File: " + _fileName + "\n";
   msg += buildProgressBar(_progress) + " " + String(_progress, 1) + "%\n";
-  if (_isPaused) msg += "** PAUSED **\n";
+  if (_isPaused) {
+    if (_marlinWaitingForUser && _marlinPrompt.length() > 0) {
+      msg += "PAUSED - LCD: " + _marlinPrompt + "\n";
+    } else if (_marlinWaitingForUser) {
+      msg += "PAUSED (waiting for user)\n";
+    } else {
+      msg += "PAUSED (processing...)\n";
+    }
+  }
   if (_printTime.length() > 0) msg += "Elapsed: " + _printTime + "\n";
   msg += "Time Left: ~" + timeLeft + "\n";
   msg += "Hotend: " + String(_hotendActual, 0) + "/" + String(_hotendTarget, 0) + "C\n";
@@ -370,10 +449,18 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
   // ── Display / LCD info ──
   else if (lc == "/display" || lc == "/screen" || lc == "/lcd") {
     String state = "Idle";
-    if (_isPaused) state = "PAUSED";
+    if (_isPaused && _marlinWaitingForUser) state = "WAITING FOR USER";
+    else if (_isPaused) state = "PAUSED";
     else if (_isPrinting) state = "Printing";
+
     String msg = "Printer Screen:\n";
     msg += "State: " + state + "\n";
+
+    // Show what's on the LCD prompt if Marlin is waiting
+    if (_marlinWaitingForUser && _marlinPrompt.length() > 0) {
+      msg += "LCD Prompt: " + _marlinPrompt + "\n";
+    }
+
     if (_isPrinting || _isPaused) {
       if (_fileName.length() > 0) msg += "File: " + _fileName + "\n";
       msg += "Progress: " + String(_progress, 1) + "%\n";
@@ -399,7 +486,7 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     esp3d_serial_service.writeBytes((const uint8_t*)"G28 Z\n", 6);
     sendTelegramReply("Homing Z axis");
   }
-  // ── BUG FIX #4: Pause (M25) ──
+  // ── Pause (M25) ──
   else if (lc == "/pause") {
     if (!_isPrinting && !_isPaused) {
       sendTelegramReply("Nothing to pause - printer is idle.");
@@ -411,51 +498,70 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     }
     esp3d_serial_service.writeBytes((const uint8_t*)"M25\n", 4);
     _isPaused = true;
+    _autoBreakWaits = false;  // Don't auto-break during intentional pause
     sendTelegramReply("Print Paused (M25 sent)\nNozzle will park safely.\nSend /resume to continue or /stop to cancel.");
   }
-  // ── BUG FIX #4: Resume (M108 breaks wait_for_user, triggers auto-resume) ──
+  // ── Resume ──
+  // M108 breaks Marlin's wait_for_user via EMERGENCY_PARSER.
+  // After first M108, Marlin calls resume_print() which:
+  //   1. Reheats nozzle (if cooled)
+  //   2. Purges filament
+  //   3. Shows "Purge More / Continue" = SECOND wait_for_user
+  // We enable autoBreakWaits to auto-send M108 again when Marlin
+  // re-enters wait_for_user for the purge prompt.
   else if (lc == "/resume") {
     if (!_isPaused) {
       sendTelegramReply("Printer is not paused. Nothing to resume.");
       return;
     }
-    // M108 breaks Marlin's blocking wait_for_user loop via EMERGENCY_PARSER
-    // Marlin then automatically calls resume_print() (reheat, unpark, unretract, resume SD)
-    // M24 sent as fallback safety net
+    // Send first M108 to break initial "Click to resume" wait
     esp3d_serial_service.writeBytes((const uint8_t*)"M108\n", 5);
-    delay(100);
-    esp3d_serial_service.writeBytes((const uint8_t*)"M24\n", 4);
-    _isPaused = false;
-    _isPrinting = true;
-    sendTelegramReply("Print Resuming (M108+M24 sent)\nReheating, unparking, and continuing...");
+    // Enable auto-break for subsequent wait_for_user loops (purge prompt)
+    _autoBreakWaits = true;
+    _autoBreakCount = AUTO_M108_MAX_COUNT;
+    _lastAutoM108Time = millis();
+    _needAutoM108 = false;
+    _marlinWaitingForUser = false;  // Will be set true again if Marlin re-enters wait
+    // Don't clear _isPaused yet — wait until we see "SD printing byte" or "//action:resumed"
+    sendTelegramReply("Resuming print...\nM108 sent. Auto-skipping purge prompt.");
   }
-  // ── BUG FIX #4: Stop (M108 breaks wait, M524 aborts, cool down) ──
+  // ── Stop ──
+  // Same issue: if paused, Marlin is in wait_for_user. Need M108 to break it
+  // before M524 can take effect.
   else if (lc == "/stop") {
     if (!_isPrinting && !_isPaused) {
       sendTelegramReply("Nothing to stop - printer is idle.");
       return;
     }
-    // M108 breaks wait_for_user if paused
-    // M524 aborts SD print
-    // M104 S0 / M140 S0 cool down heaters
+    // M108 breaks any active wait_for_user
     esp3d_serial_service.writeBytes((const uint8_t*)"M108\n", 5);
     delay(50);
+    // M524 aborts SD print
     esp3d_serial_service.writeBytes((const uint8_t*)"M524\n", 5);
     delay(50);
+    // Cool down heaters
     esp3d_serial_service.writeBytes((const uint8_t*)"M104 S0\nM140 S0\n", 16);
+    // Enable auto-break in case Marlin enters another wait during cleanup
+    _autoBreakWaits = true;
+    _autoBreakCount = AUTO_M108_MAX_COUNT;
+    _lastAutoM108Time = millis();
+    _needAutoM108 = false;
     _isPaused = false;
     _isPrinting = false;
     _wasPrinting = false;
     _progress = 0;
+    _marlinPrompt = "";
     sendTelegramReply("Print Cancelled (M108+M524 sent)\nHeaters turning off.\nPrinter will return to idle.");
   }
   // ── Emergency ──
   else if (lc == "/emergency") {
-    // M112 is handled by EMERGENCY_PARSER even during wait_for_user
     esp3d_serial_service.writeBytes((const uint8_t*)"M112\n", 5);
     _isPaused = false;
     _isPrinting = false;
     _wasPrinting = false;
+    _autoBreakWaits = false;
+    _autoBreakCount = 0;
+    _marlinPrompt = "";
     sendTelegramReply("EMERGENCY STOP (M112 sent)\nAll motors and heaters killed immediately!");
   }
   // ── Cooldown ──
@@ -605,7 +711,7 @@ void TelegramMonitor::pollTelegramUpdates() {
       int ts = tp + 8, te = chunk.indexOf('"', ts);
       if (te > ts) {
         String cmdText = chunk.substring(ts, te);
-        // BUG FIX #1: On first poll after boot, skip executing commands
+        // On first poll after boot, skip executing commands
         // Only update _lastUpdateId to discard stale messages
         if (!_skipFirstPoll) {
           _pendingCommand = cmdText;
@@ -625,6 +731,33 @@ void TelegramMonitor::handle() {
   if (!_started) return;
   uint32_t now = millis();
 
+  // ────────────────────────────────────────────────────
+  // PRIORITY 0: Auto-break Marlin's wait_for_user loops
+  // This runs FIRST and FAST — no network involved, just serial writeBytes
+  // When _needAutoM108 is set (by ISR detecting "paused for user"),
+  // send M108 to break through the purge prompt or any other wait
+  // ────────────────────────────────────────────────────
+  if (_autoBreakWaits && _needAutoM108 && _autoBreakCount > 0) {
+    if (now - _lastAutoM108Time >= AUTO_M108_COOLDOWN) {
+      esp3d_serial_service.writeBytes((const uint8_t*)"M108\n", 5);
+      _autoBreakCount--;
+      _lastAutoM108Time = now;
+      _needAutoM108 = false;
+      _marlinWaitingForUser = false;
+      if (_autoBreakCount == 0) {
+        _autoBreakWaits = false;
+      }
+    }
+  }
+
+  // Auto-break timeout: if 30 seconds pass with autoBreakWaits still active
+  // but no progress, give up to prevent infinite loops
+  if (_autoBreakWaits && (now - _lastAutoM108Time >= 30000)) {
+    _autoBreakWaits = false;
+    _autoBreakCount = 0;
+    _needAutoM108 = false;
+  }
+
   // 1. Execute queued command (safe: SSL connection already closed)
   if (_pendingCommand.length() > 0) {
     String cmd = _pendingCommand;
@@ -632,7 +765,7 @@ void TelegramMonitor::handle() {
     _pendingCommand = "";
     _pendingFromId = "";
     processTelegramCommand(cmd, fid);
-    return;  // Process only one command per handle() cycle for stability
+    return;  // One operation per handle() cycle
   }
 
   // 2. Send file list reply (deferred from serial ISR)
@@ -641,7 +774,7 @@ void TelegramMonitor::handle() {
     _readyToSendFileList = false;
     _collectingFiles = false;
     sendSDFileListReply();
-    return;  // One network operation per cycle
+    return;
   }
 
   // 3. File list timeout (4 seconds)
@@ -684,13 +817,14 @@ void TelegramMonitor::handle() {
     esp3d_serial_service.writeBytes((const uint8_t*)"M31\n", 4);
   }
 
-  // 7. Detect print finished (BUG FIX #3: only when NOT paused)
-  if (!_isPrinting && !_isPaused && _wasPrinting) {
+  // 7. Detect print finished (only when NOT paused and NOT auto-breaking)
+  if (!_isPrinting && !_isPaused && !_autoBreakWaits && _wasPrinting) {
     sendPrintFinished();
     _wasPrinting = false;
     _progress = 0;
     _printTime = "";
     _fileName = "";
+    _marlinPrompt = "";
     _lastIdleUpdateTime = now;
   }
 
@@ -701,7 +835,7 @@ void TelegramMonitor::handle() {
   }
 
   // 9. Periodic idle update (every 5 minutes)
-  if (!_isPrinting && !_isPaused && (now - _lastIdleUpdateTime >= TELEGRAM_IDLE_INTERVAL)) {
+  if (!_isPrinting && !_isPaused && !_autoBreakWaits && (now - _lastIdleUpdateTime >= TELEGRAM_IDLE_INTERVAL)) {
     sendIdleStatus();
     _lastIdleUpdateTime = now;
   }

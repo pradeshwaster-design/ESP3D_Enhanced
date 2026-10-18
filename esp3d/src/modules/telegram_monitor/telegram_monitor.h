@@ -1,12 +1,13 @@
 /*
   telegram_monitor.h - 2-Way Interactive Telegram Monitor & Remote Control
   
-  All bugs fixed:
+  V3 - All bugs fixed including:
+  - Auto-break Marlin's multiple wait_for_user loops on resume
+  - Track Marlin prompt/LCD state (Purge More / Continue detection)
   - Skip stale Telegram messages on boot (no double reboot)
   - Pause state tracking (no false "Print Finished" on pause)
   - Correct Marlin commands (M108 for resume, M108+M524 for stop)
   - Safe deferred network calls (no crashes from serial ISR)
-  - Proper LCD message parsing
 */
 
 #ifndef _TELEGRAM_MONITOR_H
@@ -19,6 +20,8 @@
 #define TELEGRAM_IDLE_INTERVAL   300000  // 5 minutes when idle
 #define TELEGRAM_POLL_INTERVAL   4000    // Check Telegram commands every 4s
 #define MAX_SD_FILES             25
+#define AUTO_M108_COOLDOWN       4000    // Min ms between auto-M108 sends
+#define AUTO_M108_MAX_COUNT      5       // Max auto-M108s per resume/stop
 
 class TelegramMonitor {
  public:
@@ -60,6 +63,16 @@ class TelegramMonitor {
   int _feedrate;
   int _flowrate;
   String _printTime;
+
+  // Auto-M108: break through multiple wait_for_user loops
+  bool _autoBreakWaits;          // True = auto-send M108 when "paused for user" detected
+  uint8_t _autoBreakCount;       // Remaining auto-M108 sends allowed
+  uint32_t _lastAutoM108Time;    // Debounce: last time we sent an auto M108
+  bool _needAutoM108;            // Flag: set in ISR context, consumed in handle()
+  bool _marlinWaitingForUser;    // True when Marlin sends "busy: paused for user"
+
+  // Marlin LCD prompt tracking
+  String _marlinPrompt;          // Current prompt text (e.g. "Purge More", "Paused")
 
   // SD file listing
   String _sdFiles[MAX_SD_FILES];
