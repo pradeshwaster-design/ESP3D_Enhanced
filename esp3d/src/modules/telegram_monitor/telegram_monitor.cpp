@@ -1,19 +1,27 @@
 /*
   telegram_monitor.cpp - 2-Way Interactive Telegram Monitor & Remote Control
 
-  V3 Bug fixes:
-  1. Auto-break Marlin's MULTIPLE wait_for_user loops during resume
-     - After M25, Marlin's ADVANCED_PAUSE_FEATURE enters wait_for_user #1 ("Click to resume")
-     - M108 breaks it, but resume_print() then reheats, purges, and enters
-       wait_for_user #2 ("Purge More / Continue")
-     - This code auto-detects "busy: paused for user" and keeps sending M108
-       until the print actually resumes (SD progress detected)
-  2. Track Marlin's LCD prompt state via //action:prompt_* messages
-  3. Skip stale messages on boot (no double-reboot)
-  4. Pause state tracking - no false "Print Finished"
-  5. All network calls deferred to handle() - never from serial ISR
-  6. One network operation per handle() cycle for heap stability
-  7. URL-safe messages (encoded in notifications_service.cpp)
+  V4 Bug fixes & Feature additions:
+  1. Complete fix for Marlin's "Purge More / Continue" blocking loop:
+     - Sends M876 S1 (Host Prompt response: Continue) + M108 (End wait)
+     - M876 S1 sets pause_menu_response = PAUSE_RESPONSE_RESUME_PRINT, breaking
+       the while (pause_menu_response == PAUSE_RESPONSE_WAIT_FOR) loop instantly!
+  2. Full filament management:
+     - /load: Extrudes 60mm at 150mm/min (blocked if printing or hotend < 170C)
+     - /unload: Primes tip & retracts 430mm out of Bowden tube (blocked if printing or hotend < 170C)
+  3. Temperature control presets & manual setting:
+     - /preheat pla: 200C Hotend / 60C Bed
+     - /preheat petg: 240C Hotend / 75C Bed
+     - /temp <deg>: Sets hotend target (0-260C safety limit)
+     - /bed <deg>: Sets bed target (0-100C safety limit)
+     - /cooldown: Turns off all heaters
+  4. Prompt response controls:
+     - /continue: Explicitly select Continue on any prompt (M876 S1 + M108)
+     - /purge: Explicitly select Purge More on prompt (M876 S0)
+  5. Reliable cancel (/stop):
+     - Sends M876 S1 + M108 + M524 + M104 S0 + M140 S0 to unblock Marlin
+       and guarantee heaters turn off
+  6. All network calls deferred to handle() for total heap stability
 */
 
 #include "../../include/esp3d_config.h"
@@ -203,7 +211,6 @@ void TelegramMonitor::parseSingleLine(const char* line) {
       if (_bytesTotal > 0) {
         _progress = ((float)_bytesDone / (float)_bytesTotal) * 100.0;
         _isPrinting = true;
-        // Seeing SD progress = definitely running, not paused
         _isPaused = false;
         _autoBreakWaits = false;
         _autoBreakCount = 0;
@@ -214,7 +221,6 @@ void TelegramMonitor::parseSingleLine(const char* line) {
   }
 
   // --- "Not SD printing" ---
-  // Only mark as not-printing if we are NOT paused and NOT trying to resume
   if (d.indexOf("Not SD printing") >= 0) {
     if (!_isPaused && !_autoBreakWaits) {
       _isPrinting = false;
@@ -244,51 +250,56 @@ void TelegramMonitor::parseSingleLine(const char* line) {
     if (pp > flP + 6) _flowrate = d.substring(flP + 6, pp).toInt();
   }
 
-  // ──────────────────────────────────────────────────────
-  // CRITICAL: Marlin keepalive "busy: paused for user"
-  // Sent every 2s while Marlin is blocked in wait_for_user
-  // This happens TWICE during resume: once for initial pause,
-  // once for "Purge More / Continue" prompt
-  // ──────────────────────────────────────────────────────
+  // --- Marlin keepalive "busy: paused for user" ---
   if (d.indexOf("paused for user") >= 0) {
     _marlinWaitingForUser = true;
     _isPaused = true;
-    _isPrinting = true;  // Still "printing" (just paused)
-    // If we're trying to auto-break waits, flag for M108 in handle()
-    // NEVER send writeBytes from here (serial ISR context!)
+    _isPrinting = true;
     if (_autoBreakWaits && _autoBreakCount > 0) {
       _needAutoM108 = true;
     }
   }
 
-  // --- "busy: processing" = Marlin is busy but NOT waiting for user ---
+  // --- "busy: processing" ---
   if (d.indexOf("busy: processing") >= 0) {
     _marlinWaitingForUser = false;
-    // During resume, "busy: processing" means Marlin is reheating/moving
-    // Don't clear _autoBreakWaits - still might need M108 for purge prompt
   }
 
-  // --- Host action messages (//action:*) ---
-  // These tell us what Marlin's LCD is showing
+  // --- Host action & prompt messages (//action:*) ---
   if (d.startsWith("//action:")) {
     String action = d.substring(9);
     action.trim();
 
-    // Track prompt for /display command
     if (action.startsWith("prompt_begin ")) {
       _marlinPrompt = action.substring(13);
       _marlinPrompt.trim();
+      _marlinWaitingForUser = true;
+      if (_autoBreakWaits && _autoBreakCount > 0) {
+        _needAutoM108 = true;
+      }
     }
     else if (action.startsWith("prompt_button ")) {
-      // Append button options to prompt
       String btn = action.substring(14);
       btn.trim();
       if (_marlinPrompt.length() > 0) {
         _marlinPrompt += " | " + btn;
+      } else {
+        _marlinPrompt = btn;
+      }
+      _marlinWaitingForUser = true;
+      if (_autoBreakWaits && _autoBreakCount > 0) {
+        _needAutoM108 = true;
+      }
+    }
+    else if (action == "prompt_show") {
+      _marlinWaitingForUser = true;
+      if (_autoBreakWaits && _autoBreakCount > 0) {
+        _needAutoM108 = true;
       }
     }
     else if (action == "prompt_end") {
       _marlinPrompt = "";
+      _marlinWaitingForUser = false;
     }
     else if (action == "paused" || action == "pause") {
       _isPaused = true;
@@ -312,7 +323,7 @@ void TelegramMonitor::parseSingleLine(const char* line) {
     }
   }
 
-  // --- SD file list (from M20): ---
+  // --- SD file list (from M20) ---
   if (d.indexOf("Begin file list") >= 0) {
     _collectingFiles = true;
     _sdFileCount = 0;
@@ -321,7 +332,7 @@ void TelegramMonitor::parseSingleLine(const char* line) {
   if (d.indexOf("End file list") >= 0) {
     _collectingFiles = false;
     if (_pendingFilesRequest) {
-      _readyToSendFileList = true;  // Deferred to handle()
+      _readyToSendFileList = true;
     }
     return;
   }
@@ -330,7 +341,7 @@ void TelegramMonitor::parseSingleLine(const char* line) {
     fname.trim();
     if (fname.length() > 0 && !fname.startsWith("ok") && !fname.startsWith("//") && !fname.startsWith("echo:")) {
       int sp = fname.indexOf(' ');
-      if (sp > 0) fname = fname.substring(0, sp);  // Remove trailing file size
+      if (sp > 0) fname = fname.substring(0, sp);
       if (_sdFileCount < MAX_SD_FILES) {
         _sdFiles[_sdFileCount++] = fname;
       }
@@ -429,12 +440,100 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
       sendIdleStatus();
     }
   }
-  // ── Temperature ──
+  // ── Temperature: Query or Set ──
   else if (lc == "/temp") {
     String msg = "Temperatures:\n";
     msg += "Hotend: " + String(_hotendActual, 1) + " / " + String(_hotendTarget, 0) + "C\n";
     msg += "Bed: " + String(_bedActual, 1) + " / " + String(_bedTarget, 0) + "C";
     sendTelegramReply(msg);
+  }
+  else if (lc.startsWith("/temp ") || lc.startsWith("/settemp ") || lc.startsWith("/hotend ")) {
+    int sp = cmd.indexOf(' ');
+    String arg = cmd.substring(sp + 1);
+    arg.trim();
+    float target = arg.toFloat();
+    if (target < 0 || target > 260.0) {
+      sendTelegramReply("Invalid hotend temp! Range: 0 to 260C (safe PTFE limit).");
+      return;
+    }
+    String gcode = "M104 S" + String((int)target) + "\n";
+    esp3d_serial_service.writeBytes((const uint8_t*)gcode.c_str(), gcode.length());
+    _hotendTarget = target;
+    sendTelegramReply("Hotend target set to " + String((int)target) + "C");
+  }
+  // ── Bed Temperature: Set ──
+  else if (lc.startsWith("/bed ") || lc.startsWith("/setbed ")) {
+    int sp = cmd.indexOf(' ');
+    String arg = cmd.substring(sp + 1);
+    arg.trim();
+    float target = arg.toFloat();
+    if (target < 0 || target > 100.0) {
+      sendTelegramReply("Invalid bed temp! Range: 0 to 100C.");
+      return;
+    }
+    String gcode = "M140 S" + String((int)target) + "\n";
+    esp3d_serial_service.writeBytes((const uint8_t*)gcode.c_str(), gcode.length());
+    _bedTarget = target;
+    sendTelegramReply("Bed target set to " + String((int)target) + "C");
+  }
+  // ── Preheat PLA (Hotend 200C / Bed 60C) ──
+  else if (lc == "/preheat pla" || lc == "/preheat_pla" || lc == "/pla") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M104 S200\nM140 S60\n", 20);
+    _hotendTarget = 200;
+    _bedTarget = 60;
+    sendTelegramReply("Preheating PLA:\nHotend: 200C | Bed: 60C");
+  }
+  // ── Preheat PETG (Hotend 240C / Bed 75C) ──
+  else if (lc == "/preheat petg" || lc == "/preheat_petg" || lc == "/petg") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M104 S240\nM140 S75\n", 20);
+    _hotendTarget = 240;
+    _bedTarget = 75;
+    sendTelegramReply("Preheating PETG:\nHotend: 240C | Bed: 75C");
+  }
+  // ── Cooldown / Off ──
+  else if (lc == "/cooldown" || lc == "/off") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M104 S0\nM140 S0\n", 16);
+    _hotendTarget = 0;
+    _bedTarget = 0;
+    sendTelegramReply("Cooldown: Hotend and Bed heaters turned OFF");
+  }
+  // ── Filament: Load ──
+  else if (lc == "/load" || lc == "/loadfilament") {
+    if (_isPrinting && !_isPaused) {
+      sendTelegramReply("Cannot load filament while actively printing!\nPause the print first with /pause.");
+      return;
+    }
+    if (_hotendActual < 170.0) {
+      sendTelegramReply("Hotend is too cold (" + String(_hotendActual, 0) + "C)!\nCold extrusion is prevented.\nHeat hotend to at least 180C first (use /preheat pla or /temp 200).");
+      return;
+    }
+    // Relative extrusion, extrude 60mm at 150mm/min
+    esp3d_serial_service.writeBytes((const uint8_t*)"G91\nM83\nG1 E60 F150\nG90\n", 27);
+    sendTelegramReply("Loading filament...\nExtruding 60mm at 150 mm/min.\nSend /load again if more purge is needed.");
+  }
+  // ── Filament: Unload ──
+  else if (lc == "/unload" || lc == "/unloadfilament") {
+    if (_isPrinting && !_isPaused) {
+      sendTelegramReply("Cannot unload filament while actively printing!\nPause the print first with /pause.");
+      return;
+    }
+    if (_hotendActual < 170.0) {
+      sendTelegramReply("Hotend is too cold (" + String(_hotendActual, 0) + "C)!\nCold retraction is prevented.\nHeat hotend to at least 180C first (use /preheat pla or /temp 200).");
+      return;
+    }
+    // Relative mode: melt tip (+10mm), rapid heatbreak retract (-80mm), fast Bowden unload (-350mm)
+    esp3d_serial_service.writeBytes((const uint8_t*)"G91\nM83\nG1 E10 F200\nG1 E-80 F1500\nG1 E-350 F2500\nG90\n", 51);
+    sendTelegramReply("Unloading filament...\nMelting tip and retracting 430mm out of the Bowden tube.");
+  }
+  // ── Prompt Response: Continue ──
+  else if (lc == "/continue") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M876 S1\nM108\n", 13);
+    sendTelegramReply("Prompt response sent: Continue (M876 S1 + M108)");
+  }
+  // ── Prompt Response: Purge More ──
+  else if (lc == "/purge") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M876 S0\n", 8);
+    sendTelegramReply("Prompt response sent: Purge More (M876 S0)");
   }
   // ── Position ──
   else if (lc == "/pos" || lc == "/position") {
@@ -456,9 +555,8 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     String msg = "Printer Screen:\n";
     msg += "State: " + state + "\n";
 
-    // Show what's on the LCD prompt if Marlin is waiting
     if (_marlinWaitingForUser && _marlinPrompt.length() > 0) {
-      msg += "LCD Prompt: " + _marlinPrompt + "\n";
+      msg += "Active Prompt: " + _marlinPrompt + "\n";
     }
 
     if (_isPrinting || _isPaused) {
@@ -498,60 +596,46 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     }
     esp3d_serial_service.writeBytes((const uint8_t*)"M25\n", 4);
     _isPaused = true;
-    _autoBreakWaits = false;  // Don't auto-break during intentional pause
+    _autoBreakWaits = false;
     sendTelegramReply("Print Paused (M25 sent)\nNozzle will park safely.\nSend /resume to continue or /stop to cancel.");
   }
-  // ── Resume ──
-  // M108 breaks Marlin's wait_for_user via EMERGENCY_PARSER.
-  // After first M108, Marlin calls resume_print() which:
-  //   1. Reheats nozzle (if cooled)
-  //   2. Purges filament
-  //   3. Shows "Purge More / Continue" = SECOND wait_for_user
-  // We enable autoBreakWaits to auto-send M108 again when Marlin
-  // re-enters wait_for_user for the purge prompt.
+  // ── Resume (M876 S1 breaks prompt, M108 breaks wait, M24 resumes) ──
   else if (lc == "/resume") {
     if (!_isPaused) {
       sendTelegramReply("Printer is not paused. Nothing to resume.");
       return;
     }
-    // Send first M108 to break initial "Click to resume" wait
-    esp3d_serial_service.writeBytes((const uint8_t*)"M108\n", 5);
-    // Enable auto-break for subsequent wait_for_user loops (purge prompt)
+    // M876 S1 selects 'Continue' on Purge More / Continue host prompt
+    // M108 clears marlin.wait_for_user
+    // M24 resumes SD card print
+    esp3d_serial_service.writeBytes((const uint8_t*)"M876 S1\nM108\nM24\n", 17);
     _autoBreakWaits = true;
     _autoBreakCount = AUTO_M108_MAX_COUNT;
     _lastAutoM108Time = millis();
     _needAutoM108 = false;
-    _marlinWaitingForUser = false;  // Will be set true again if Marlin re-enters wait
-    // Don't clear _isPaused yet — wait until we see "SD printing byte" or "//action:resumed"
-    sendTelegramReply("Resuming print...\nM108 sent. Auto-skipping purge prompt.");
+    _marlinWaitingForUser = false;
+    sendTelegramReply("Resuming print...\nSent M876 S1 + M108 + M24.\nAuto-skipping Purge/Continue prompt.");
   }
-  // ── Stop ──
-  // Same issue: if paused, Marlin is in wait_for_user. Need M108 to break it
-  // before M524 can take effect.
+  // ── Stop (M876 S1 + M108 + M524 + Cooldown) ──
   else if (lc == "/stop") {
     if (!_isPrinting && !_isPaused) {
       sendTelegramReply("Nothing to stop - printer is idle.");
       return;
     }
-    // M108 breaks any active wait_for_user
-    esp3d_serial_service.writeBytes((const uint8_t*)"M108\n", 5);
-    delay(50);
-    // M524 aborts SD print
-    esp3d_serial_service.writeBytes((const uint8_t*)"M524\n", 5);
-    delay(50);
-    // Cool down heaters
-    esp3d_serial_service.writeBytes((const uint8_t*)"M104 S0\nM140 S0\n", 16);
-    // Enable auto-break in case Marlin enters another wait during cleanup
-    _autoBreakWaits = true;
-    _autoBreakCount = AUTO_M108_MAX_COUNT;
-    _lastAutoM108Time = millis();
+    // M876 S1 & M108 break out of blocking pause loops
+    // M524 aborts SD file
+    // M104 S0 / M140 S0 shut off heaters
+    esp3d_serial_service.writeBytes((const uint8_t*)"M876 S1\nM108\nM524\nM104 S0\nM140 S0\n", 29);
+    _autoBreakWaits = false;
+    _autoBreakCount = 0;
     _needAutoM108 = false;
     _isPaused = false;
     _isPrinting = false;
     _wasPrinting = false;
     _progress = 0;
     _marlinPrompt = "";
-    sendTelegramReply("Print Cancelled (M108+M524 sent)\nHeaters turning off.\nPrinter will return to idle.");
+    _marlinWaitingForUser = false;
+    sendTelegramReply("Print Cancelled (M876 S1 + M108 + M524 sent)\nHeaters turning off.\nPrinter will return to idle.");
   }
   // ── Emergency ──
   else if (lc == "/emergency") {
@@ -563,11 +647,6 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     _autoBreakCount = 0;
     _marlinPrompt = "";
     sendTelegramReply("EMERGENCY STOP (M112 sent)\nAll motors and heaters killed immediately!");
-  }
-  // ── Cooldown ──
-  else if (lc == "/cooldown") {
-    esp3d_serial_service.writeBytes((const uint8_t*)"M104 S0\nM140 S0\n", 16);
-    sendTelegramReply("Cooldown: Hotend and Bed heaters turned OFF");
   }
   // ── List SD files ──
   else if (lc == "/files" || lc == "/ls") {
@@ -618,19 +697,32 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
   // ── Help ──
   else if (lc == "/help" || lc == "/start") {
     String msg = "3D Printer Remote Control\n\n";
-    msg += "/status - Print progress and stats\n";
-    msg += "/temp - Temperatures\n";
-    msg += "/pos - Tool head position\n";
-    msg += "/display - Full printer screen info\n";
-    msg += "/home - Home all axes\n";
+    msg += "STATUS:\n";
+    msg += "/status - Live print progress & stats\n";
+    msg += "/temp - Check current temperatures\n";
+    msg += "/pos - Tool head coordinates\n";
+    msg += "/display - Screen info & active prompts\n\n";
+    msg += "PRINT CONTROL:\n";
+    msg += "/pause - Pause print safely (M25)\n";
+    msg += "/resume - Resume print (skips prompts)\n";
+    msg += "/stop - Cancel print & cool down\n";
+    msg += "/continue - Select 'Continue' on prompt\n";
+    msg += "/purge - Select 'Purge More' on prompt\n";
+    msg += "/emergency - Instant kill (M112)\n\n";
+    msg += "TEMPERATURE:\n";
+    msg += "/preheat pla - 200C Hotend / 60C Bed\n";
+    msg += "/preheat petg - 240C Hotend / 75C Bed\n";
+    msg += "/temp <deg> - Set hotend temp (e.g. /temp 210)\n";
+    msg += "/bed <deg> - Set bed temp (e.g. /bed 60)\n";
+    msg += "/cooldown - Turn off all heaters\n\n";
+    msg += "FILAMENT (Idle or Paused):\n";
+    msg += "/load - Extrude 60mm filament\n";
+    msg += "/unload - Retract 430mm out of tube\n\n";
+    msg += "SD CARD & MOTION:\n";
+    msg += "/home [x|y|z] - Home axes (G28)\n";
     msg += "/files - List SD card files\n";
     msg += "/print <n> - Print file by number\n";
-    msg += "/pause - Pause print\n";
-    msg += "/resume - Resume print\n";
-    msg += "/stop - Cancel print safely\n";
-    msg += "/emergency - Kill stop\n";
-    msg += "/cooldown - Turn off heaters\n";
-    msg += "/help - This list";
+    msg += "/help - This command list";
     sendTelegramReply(msg);
   }
   else if (lc.startsWith("/")) {
@@ -677,7 +769,7 @@ void TelegramMonitor::pollTelegramUpdates() {
       if (resp.length() > 4096) break;
     }
   }
-  client.stop();  // Close connection BEFORE processing
+  client.stop();
 
   if (!inBody || resp.length() == 0) return;
 
@@ -711,8 +803,6 @@ void TelegramMonitor::pollTelegramUpdates() {
       int ts = tp + 8, te = chunk.indexOf('"', ts);
       if (te > ts) {
         String cmdText = chunk.substring(ts, te);
-        // On first poll after boot, skip executing commands
-        // Only update _lastUpdateId to discard stale messages
         if (!_skipFirstPoll) {
           _pendingCommand = cmdText;
           _pendingFromId = fromId;
@@ -722,7 +812,6 @@ void TelegramMonitor::pollTelegramUpdates() {
     idx = next;
   }
 
-  // After first successful poll, clear skip flag
   if (_skipFirstPoll) _skipFirstPoll = false;
 }
 
@@ -732,14 +821,12 @@ void TelegramMonitor::handle() {
   uint32_t now = millis();
 
   // ────────────────────────────────────────────────────
-  // PRIORITY 0: Auto-break Marlin's wait_for_user loops
-  // This runs FIRST and FAST — no network involved, just serial writeBytes
-  // When _needAutoM108 is set (by ISR detecting "paused for user"),
-  // send M108 to break through the purge prompt or any other wait
+  // PRIORITY 0: Auto-respond to Marlin prompts & wait loops
+  // Sends M876 S1 (select Continue) + M108 (break wait)
   // ────────────────────────────────────────────────────
   if (_autoBreakWaits && _needAutoM108 && _autoBreakCount > 0) {
     if (now - _lastAutoM108Time >= AUTO_M108_COOLDOWN) {
-      esp3d_serial_service.writeBytes((const uint8_t*)"M108\n", 5);
+      esp3d_serial_service.writeBytes((const uint8_t*)"M876 S1\nM108\n", 13);
       _autoBreakCount--;
       _lastAutoM108Time = now;
       _needAutoM108 = false;
@@ -750,8 +837,7 @@ void TelegramMonitor::handle() {
     }
   }
 
-  // Auto-break timeout: if 30 seconds pass with autoBreakWaits still active
-  // but no progress, give up to prevent infinite loops
+  // Timeout: if 30s pass with autoBreakWaits still active, stop to prevent loops
   if (_autoBreakWaits && (now - _lastAutoM108Time >= 30000)) {
     _autoBreakWaits = false;
     _autoBreakCount = 0;
@@ -765,7 +851,7 @@ void TelegramMonitor::handle() {
     _pendingCommand = "";
     _pendingFromId = "";
     processTelegramCommand(cmd, fid);
-    return;  // One operation per handle() cycle
+    return;
   }
 
   // 2. Send file list reply (deferred from serial ISR)
