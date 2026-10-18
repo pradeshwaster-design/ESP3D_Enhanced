@@ -69,6 +69,8 @@ class TelegramMonitor {
   uint32_t _uploadLineNum;
   String _uploadLineBuffer;
   uint32_t _uploadLastActivity;
+  int _uploadInFlight;
+  uint32_t _uploadLastOkTime;
 
   // Stop cooldown guard (suppresses trailing SD progress reports after /stop)
   uint32_t _stopCooldownUntil;

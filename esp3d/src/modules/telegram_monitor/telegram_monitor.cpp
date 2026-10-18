@@ -57,6 +57,8 @@ TelegramMonitor::TelegramMonitor() {
   _uploadLineNum = 0;
   _uploadLineBuffer = "";
   _uploadLastActivity = 0;
+  _uploadInFlight = 0;
+  _uploadLastOkTime = 0;
   _stopCooldownUntil = 0;
   _isPrinting = false;
   _wasPrinting = false;
@@ -121,6 +123,8 @@ void TelegramMonitor::begin() {
   _uploadLineNum = 0;
   _uploadLineBuffer = "";
   _uploadLastActivity = 0;
+  _uploadInFlight = 0;
+  _uploadLastOkTime = 0;
   _stopCooldownUntil = 0;
   _isPaused = false;
   _isKilled = false;
@@ -239,6 +243,14 @@ void TelegramMonitor::parseSingleLine(const char* line) {
       _isKilled = false;
       _checkingAlive = false;
       _marlinPrompt = "";
+    }
+  }
+
+  // --- Marlin 'ok' flow control during upload ---
+  if (d.startsWith("ok") || d.indexOf("ok") >= 0) {
+    if (_uploadState == UPLOAD_STREAMING) {
+      if (_uploadInFlight > 0) _uploadInFlight--;
+      _uploadLastOkTime = millis();
     }
   }
 
@@ -663,7 +675,9 @@ void TelegramMonitor::startFileUpload(const String& fileId, const String& fileNa
   _uploadBytesSent = 0;
   _uploadLineNum = 0;
   _uploadLineBuffer = "";
+  _uploadInFlight = 0;
   _uploadLastActivity = millis();
+  _uploadLastOkTime = millis();
   _uploadState = UPLOAD_RESOLVE_URL;
 
   sendTelegramReply("📥 Downloading from Telegram...\nFile: " + fileName + " (" + String(fileSize / 1024) + " KB)\nSaving as: " + _uploadSdName + "\nConnecting to storage...");
@@ -673,7 +687,7 @@ void TelegramMonitor::startFileUpload(const String& fileId, const String& fileNa
 void TelegramMonitor::handleTelegramFileUpload() {
   uint32_t now = millis();
 
-  // Inactivity timeout guard (15 seconds without data)
+  // Inactivity timeout guard (15 seconds without receiving data)
   if (now - _uploadLastActivity > 15000) {
     esp3d_serial_service.writeBytes((const uint8_t*)"\nM29\n", 5);
     _uploadClient.stop();
@@ -686,7 +700,7 @@ void TelegramMonitor::handleTelegramFileUpload() {
   if (_uploadState == UPLOAD_RESOLVE_URL) {
     const String& token = notificationsservice.getToken1();
     _uploadClient.setInsecure();
-    _uploadClient.setTimeout(4);
+    _uploadClient.setTimeout(5000); // 5000 ms
     if (!_uploadClient.connect("api.telegram.org", 443)) {
       _uploadState = UPLOAD_IDLE;
       sendTelegramReply("❌ Failed to connect to Telegram server for download!");
@@ -697,7 +711,7 @@ void TelegramMonitor::handleTelegramFileUpload() {
     _uploadClient.print(req);
 
     uint32_t t0 = millis();
-    while (!_uploadClient.available() && (millis() - t0 < 3000)) delay(10);
+    while (!_uploadClient.available() && (millis() - t0 < 4000)) delay(10);
     if (!_uploadClient.available()) {
       _uploadClient.stop();
       _uploadState = UPLOAD_IDLE;
@@ -738,7 +752,7 @@ void TelegramMonitor::handleTelegramFileUpload() {
   if (_uploadState == UPLOAD_CONNECT_STREAM) {
     const String& token = notificationsservice.getToken1();
     _uploadClient.setInsecure();
-    _uploadClient.setTimeout(5);
+    _uploadClient.setTimeout(5000); // 5000 ms
     if (!_uploadClient.connect("api.telegram.org", 443)) {
       _uploadState = UPLOAD_IDLE;
       sendTelegramReply("❌ Failed to connect to Telegram file storage!");
@@ -749,7 +763,7 @@ void TelegramMonitor::handleTelegramFileUpload() {
     _uploadClient.print(req);
 
     uint32_t t0 = millis();
-    while (!_uploadClient.available() && (millis() - t0 < 4000)) delay(10);
+    while (!_uploadClient.available() && (millis() - t0 < 5000)) delay(10);
     if (!_uploadClient.available()) {
       _uploadClient.stop();
       _uploadState = UPLOAD_IDLE;
@@ -757,11 +771,11 @@ void TelegramMonitor::handleTelegramFileUpload() {
       return;
     }
 
-    // Skip HTTP response headers
+    // Skip HTTP response headers and extract Content-Length
     bool inBody = false;
     String headerBuf = "";
     t0 = millis();
-    while ((_uploadClient.connected() || _uploadClient.available()) && (millis() - t0 < 3000)) {
+    while ((_uploadClient.connected() || _uploadClient.available()) && (millis() - t0 < 4000)) {
       char c = _uploadClient.read();
       if (c == (char)-1) continue;
       headerBuf += c;
@@ -778,6 +792,20 @@ void TelegramMonitor::handleTelegramFileUpload() {
       return;
     }
 
+    // Parse Content-Length header for exact byte count
+    int clPos = headerBuf.indexOf("Content-Length:");
+    if (clPos < 0) clPos = headerBuf.indexOf("content-length:");
+    if (clPos >= 0) {
+      int s = clPos + 15;
+      while (s < (int)headerBuf.length() && headerBuf.charAt(s) == ' ') s++;
+      int e = s;
+      while (e < (int)headerBuf.length() && isDigit(headerBuf.charAt(e))) e++;
+      if (e > s) {
+        uint32_t cl = headerBuf.substring(s, e).toInt();
+        if (cl > 0) _uploadFileSize = cl;
+      }
+    }
+
     // Initialize Marlin line number counter and start SD saving
     esp3d_serial_service.writeBytes((const uint8_t*)"M110 N0\n", 8);
     delay(50);
@@ -788,32 +816,92 @@ void TelegramMonitor::handleTelegramFileUpload() {
     _uploadLineNum = 0;
     _uploadBytesSent = 0;
     _uploadLineBuffer = "";
+    _uploadInFlight = 0;
     _uploadLastActivity = millis();
+    _uploadLastOkTime = millis();
     _uploadState = UPLOAD_STREAMING;
     return;
   }
 
-  // ── STATE 3: Non-Blocking Streaming Slices with Checksums ──
+  // ── STATE 3: Non-Blocking Streaming Slices with Flow Control & Checksums ──
   if (_uploadState == UPLOAD_STREAMING) {
-    if (!_uploadClient.connected() && !_uploadClient.available()) {
-      // Stream complete: close SD write cleanly
-      esp3d_serial_service.writeBytes((const uint8_t*)"\nM29\n", 5);
+    // Check if entire file has been downloaded from Telegram
+    bool downloadComplete = (_uploadFileSize > 0 && _uploadBytesSent >= _uploadFileSize);
+    if (!downloadComplete && !_uploadClient.connected() && !_uploadClient.available()) {
+      // Socket closed by server: check if we got within 128 bytes of file size (EOF)
+      if (_uploadBytesSent > 0 && (_uploadFileSize == 0 || _uploadBytesSent + 128 >= _uploadFileSize)) {
+        downloadComplete = true;
+      } else {
+        // Premature disconnection
+        esp3d_serial_service.writeBytes((const uint8_t*)"\nM29\n", 5);
+        _uploadClient.stop();
+        _uploadState = UPLOAD_IDLE;
+        sendTelegramReply("❌ Upload interrupted: server disconnected after " + String(_uploadBytesSent / 1024) + " KB of " + String(_uploadFileSize / 1024) + " KB.\nSD file closed.");
+        return;
+      }
+    }
+
+    if (downloadComplete) {
+      // Flush any trailing line in buffer
+      if (_uploadLineBuffer.length() > 0) {
+        String line = _uploadLineBuffer;
+        _uploadLineBuffer = "";
+        line.trim();
+        if (line.length() > 0 && line.charAt(0) != ';') {
+          int sc = line.indexOf(';');
+          if (sc >= 0) {
+            line = line.substring(0, sc);
+            line.trim();
+          }
+          if (line.length() > 0) {
+            _uploadLineNum++;
+            String cmd = "N" + String(_uploadLineNum) + " " + line;
+            uint8_t cs = 0;
+            for (size_t i = 0; i < cmd.length(); i++) cs ^= (uint8_t)cmd.charAt(i);
+            String out = cmd + "*" + String(cs) + "\n";
+            esp3d_serial_service.writeBytes((const uint8_t*)out.c_str(), out.length());
+            _uploadInFlight++;
+            _uploadLastOkTime = millis();
+          }
+        }
+      }
+
+      // Wait briefly for in-flight commands to be confirmed by Marlin's 'ok'
+      if (_uploadInFlight > 0 && (now - _uploadLastOkTime < 600)) {
+        return; // Wait next cycle for Marlin ok
+      }
+
+      // All commands written: finish M28 saving with checksummed M29
+      delay(50);
+      _uploadLineNum++;
+      String m29cmd = "N" + String(_uploadLineNum) + " M29";
+      uint8_t m29cs = 0;
+      for (size_t i = 0; i < m29cmd.length(); i++) m29cs ^= (uint8_t)m29cmd.charAt(i);
+      String m29out = m29cmd + "*" + String(m29cs) + "\nM29\n";
+      esp3d_serial_service.writeBytes((const uint8_t*)m29out.c_str(), m29out.length());
+      delay(100);
+
       _uploadClient.stop();
       _uploadState = UPLOAD_IDLE;
 
       String reply = "✅ Upload Successful!\n\n";
-      reply += "File: " + _uploadSdName + " (" + String(_uploadBytesSent / 1024) + " KB)\n";
-      reply += "Lines saved: " + String(_uploadLineNum) + "\n";
-      reply += "Saved to printer SD card.\n\n";
+      reply += "File: " + _uploadSdName + "\n";
+      reply += "Commands saved: " + String(_uploadLineNum - 1) + "\n";
+      reply += "Downloaded: " + String(_uploadBytesSent / 1024) + " KB\n";
+      reply += "Complete toolpath & shutdown sequence verified on SD.\n\n";
       reply += "To start printing now, tap:\n";
       reply += "▶️ /print " + _uploadSdName;
       sendTelegramReply(reply);
       return;
     }
 
-    // Process a slice (up to 8 non-empty lines) per handle() cycle
-    int linesThisSlice = 0;
-    while (_uploadClient.available() && linesThisSlice < 8) {
+    // Safety timeout: if Marlin hasn't sent 'ok' in 400ms, recover flow control
+    if (_uploadInFlight > 0 && (now - _uploadLastOkTime > 400)) {
+      _uploadInFlight = 0;
+    }
+
+    // Stream lines with Ping-Pong flow control (_uploadInFlight < 2)
+    while (_uploadClient.available() && _uploadInFlight < 2 && _uploadBytesSent < _uploadFileSize) {
       char c = _uploadClient.read();
       _uploadBytesSent++;
       _uploadLastActivity = millis();
@@ -823,12 +911,12 @@ void TelegramMonitor::handleTelegramFileUpload() {
         String line = _uploadLineBuffer;
         _uploadLineBuffer = "";
         line.trim();
-        if (line.length() == 0) continue;
+        if (line.length() == 0) continue; // Skip pure blank lines
 
-        // Strip pure comments
+        // Skip pure comments (; ...) so ';' never appears in serial command
         if (line.charAt(0) == ';') continue;
 
-        // Strip inline comments
+        // Strip inline comments (; ...) so ';' never precedes the '*' checksum!
         int sc = line.indexOf(';');
         if (sc >= 0) {
           line = line.substring(0, sc);
@@ -845,7 +933,8 @@ void TelegramMonitor::handleTelegramFileUpload() {
         }
         String out = cmd + "*" + String(cs) + "\n";
         esp3d_serial_service.writeBytes((const uint8_t*)out.c_str(), out.length());
-        linesThisSlice++;
+        _uploadInFlight++;
+        _uploadLastOkTime = millis();
       } else {
         if (_uploadLineBuffer.length() < 160) {
           _uploadLineBuffer += c;
@@ -1343,7 +1432,7 @@ void TelegramMonitor::pollTelegramUpdates() {
 
   WiFiClientSecure client;
   client.setInsecure();
-  client.setTimeout(2);
+  client.setTimeout(3000);
 
   if (!client.connect("api.telegram.org", 443)) return;
 
