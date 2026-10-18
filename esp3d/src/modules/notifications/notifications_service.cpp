@@ -338,11 +338,21 @@ bool NotificationsService::sendTelegramMSG(const char* title,
     return false;
   }
   (void)title;
+  // URL encode special characters in message so Telegram doesn't truncate at '&' or '%'
+  String encodedMsg = "";
+  for (size_t i = 0; message[i] != '\0'; i++) {
+    char c = message[i];
+    if (c == '%') encodedMsg += "%25";
+    else if (c == '&') encodedMsg += "%26";
+    else if (c == '+') encodedMsg += "%2B";
+    else if (c == '#') encodedMsg += "%23";
+    else encodedMsg += c;
+  }
   // build url for get
   data = "chat_id=";
   data += _token2;
   data += "&text=";
-  data += message;
+  data += encodedMsg;
 
   // build post query
   postcmd = "POST /bot";

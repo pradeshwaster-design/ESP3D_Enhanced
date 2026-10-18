@@ -37,6 +37,9 @@ class NotificationsService {
   bool isAutonotification() { return _autonotification; };
   void setAutonotification(bool value) { _autonotification = value; };
   bool sendAutoNotification(const char* msg);
+  const String& getToken1() const { return _token1; }
+  const String& getToken2() const { return _token2; }
+  uint8_t getNotificationType() const { return _notificationType; }
 
  private:
   bool _started;

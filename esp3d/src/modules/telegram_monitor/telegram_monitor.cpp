@@ -1,10 +1,11 @@
 /*
-  telegram_monitor.cpp - Periodic Telegram print status monitor
+  telegram_monitor.cpp - 2-Way Interactive Telegram Monitor & Remote Control
 
-  Parses Marlin auto-report data from the serial stream and sends:
-  - Updates every 1 minute while printing (filename, elapsed time, time left, %, Z, temps)
-  - Updates every 5 minutes when idle (idle status, temperatures)
-  - Instant notifications on print start and print finish
+  Features:
+  - 2-Way Telegram Bot: receives & executes /status, /pause, /resume, /stop, /emergency, /temp, /cooldown, /help
+  - Periodic print status updates every 1 minute
+  - Periodic idle status updates every 5 minutes
+  - Instant print start and print finish notifications
 */
 
 #include "../../include/esp3d_config.h"
@@ -13,6 +14,7 @@
 #include "telegram_monitor.h"
 #include "../notifications/notifications_service.h"
 #include "../serial/serial_service.h"
+#include <WiFiClientSecure.h>
 
 TelegramMonitor telegram_monitor;
 
@@ -21,6 +23,8 @@ TelegramMonitor::TelegramMonitor() {
   _lastPrintUpdateTime = 0;
   _lastIdleUpdateTime = 0;
   _lastPollTime = 0;
+  _lastTelegramPollTime = 0;
+  _lastUpdateId = 0;
   _isPrinting = false;
   _wasPrinting = false;
   _fileName = "Unknown";
@@ -41,6 +45,8 @@ void TelegramMonitor::begin() {
   _lastPrintUpdateTime = now;
   _lastIdleUpdateTime = now;
   _lastPollTime = now;
+  _lastTelegramPollTime = now;
+  _lastUpdateId = 0;
 }
 
 // ── Time helper functions ────────────────────────────────
@@ -218,7 +224,6 @@ static String buildProgressBar(float pct) {
 void TelegramMonitor::sendStatusUpdate() {
   if (!notificationsservice.started()) return;
 
-  // Calculate estimated time left
   uint32_t elapsedSec = parseElapsedSeconds(_printTime);
   String timeLeftStr = "Calculating...";
   if (elapsedSec > 10 && _progress > 1.0 && _progress < 99.5) {
@@ -277,15 +282,188 @@ void TelegramMonitor::sendPrintFinished() {
   notificationsservice.sendMSG("ESP3D", msg.c_str());
 }
 
+void TelegramMonitor::sendTelegramReply(const String& text) {
+  notificationsservice.sendMSG("ESP3D", text.c_str());
+}
+
+// ── 2-Way Telegram Bot Command Processing ─────────────────
+void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
+  const String& authChatId = notificationsservice.getToken2();
+  
+  // Security check: only process commands from authorized chat_id
+  if (authChatId.length() > 0 && fromId.length() > 0 && fromId != authChatId) {
+    return;
+  }
+
+  cmd.trim();
+  int atIdx = cmd.indexOf('@');
+  if (atIdx >= 0) {
+    cmd = cmd.substring(0, atIdx);
+  }
+  cmd.toLowerCase();
+
+  if (cmd == "/status") {
+    if (_isPrinting) {
+      sendStatusUpdate();
+    } else {
+      sendIdleStatus();
+    }
+  } else if (cmd == "/pause") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M25\n", 4);
+    sendTelegramReply("Print Paused (M25 sent)");
+  } else if (cmd == "/resume") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M24\n", 4);
+    sendTelegramReply("Print Resumed (M24 sent)");
+  } else if (cmd == "/stop") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M524\n", 5);
+    sendTelegramReply("Print Cancelled (M524 sent)");
+  } else if (cmd == "/emergency") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M112\n", 5);
+    sendTelegramReply("EMERGENCY STOP! M112 issued. Motors and heaters shut down immediately!");
+  } else if (cmd == "/temp") {
+    String msg = "Temperatures:\n";
+    msg += "Hotend: " + String(_hotendActual, 1) + " / " + String(_hotendTarget, 0) + "C\n";
+    msg += "Bed: " + String(_bedActual, 1) + " / " + String(_bedTarget, 0) + "C";
+    sendTelegramReply(msg);
+  } else if (cmd == "/cooldown") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M104 S0\nM140 S0\n", 16);
+    sendTelegramReply("Cooldown: Hotend and Bed heaters turned OFF");
+  } else if (cmd == "/help" || cmd == "/start") {
+    String msg = "3D Printer Remote Control\n\n";
+    msg += "/status - Live print progress and stats\n";
+    msg += "/pause - Pause print (M25)\n";
+    msg += "/resume - Resume print (M24)\n";
+    msg += "/stop - Cancel print (M524)\n";
+    msg += "/emergency - Kill stop (M112)\n";
+    msg += "/temp - Check temperatures\n";
+    msg += "/cooldown - Turn off heaters\n";
+    msg += "/help - Show command list";
+    sendTelegramReply(msg);
+  } else if (cmd.startsWith("/")) {
+    sendTelegramReply("Unknown command. Type /help to see all available commands.");
+  }
+}
+
+// ── Poll Telegram getUpdates for incoming messages ───────
+void TelegramMonitor::pollTelegramUpdates() {
+  if (!notificationsservice.started()) return;
+  if (notificationsservice.getNotificationType() != ESP_TELEGRAM_NOTIFICATION) return;
+
+  const String& token = notificationsservice.getToken1();
+  const String& authChatId = notificationsservice.getToken2();
+  if (token.length() == 0 || authChatId.length() == 0) return;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(2);
+
+  if (!client.connect("api.telegram.org", 443)) {
+    return;
+  }
+
+  String body = "offset=" + String((long long)(_lastUpdateId + 1)) + "&limit=3&timeout=0";
+
+  String req = "POST /bot" + token + "/getUpdates HTTP/1.1\r\n";
+  req += "Host: api.telegram.org\r\n";
+  req += "Connection: close\r\n";
+  req += "Content-Type: application/x-www-form-urlencoded\r\n";
+  req += "Content-Length: " + String(body.length()) + "\r\n\r\n";
+  req += body;
+
+  client.print(req);
+
+  uint32_t startMs = millis();
+  while (!client.available() && (millis() - startMs < 2000)) {
+    delay(10);
+  }
+
+  if (!client.available()) {
+    client.stop();
+    return;
+  }
+
+  bool inBody = false;
+  String line = "";
+  while (client.connected() || client.available()) {
+    char c = client.read();
+    if (c == (char)-1) continue;
+    line += c;
+    if (!inBody) {
+      if (line.endsWith("\r\n\r\n")) {
+        inBody = true;
+        line = "";
+      }
+    } else {
+      if (line.length() > 4096) break;
+    }
+  }
+  client.stop();
+
+  if (!inBody || line.length() == 0) return;
+
+  // Parse updates in JSON
+  int idx = 0;
+  while ((idx = line.indexOf("\"update_id\":", idx)) >= 0) {
+    int idStart = idx + 12;
+    int idEnd = idStart;
+    while (idEnd < (int)line.length() && (isDigit(line.charAt(idEnd)) || line.charAt(idEnd) == '-')) {
+      idEnd++;
+    }
+    int64_t updateId = atoll(line.substring(idStart, idEnd).c_str());
+    if (updateId > _lastUpdateId) {
+      _lastUpdateId = updateId;
+    }
+
+    int nextUpdate = line.indexOf("\"update_id\":", idEnd);
+    if (nextUpdate < 0) nextUpdate = line.length();
+
+    String updateChunk = line.substring(idEnd, nextUpdate);
+
+    // Extract sender / chat ID
+    String fromId = "";
+    int chatPos = updateChunk.indexOf("\"chat\":{");
+    if (chatPos >= 0) {
+      int idPos = updateChunk.indexOf("\"id\":", chatPos);
+      if (idPos >= 0) {
+        int s = idPos + 5;
+        int e = s;
+        while (e < (int)updateChunk.length() && (isDigit(updateChunk.charAt(e)) || updateChunk.charAt(e) == '-')) {
+          e++;
+        }
+        fromId = updateChunk.substring(s, e);
+      }
+    }
+
+    // Extract message text
+    int textPos = updateChunk.indexOf("\"text\":\"", 0);
+    if (textPos >= 0) {
+      int tStart = textPos + 8;
+      int tEnd = updateChunk.indexOf('"', tStart);
+      if (tEnd > tStart) {
+        String cmdText = updateChunk.substring(tStart, tEnd);
+        processTelegramCommand(cmdText, fromId);
+      }
+    }
+
+    idx = nextUpdate;
+  }
+}
+
 // ── Main handle - called from ESP3D main loop ────────────
 void TelegramMonitor::handle() {
   if (!_started) return;
 
   uint32_t now = millis();
 
-  // Periodic polling to Marlin for filename, print time, and temps
+  // 1. Check for incoming Telegram commands every 3.5 seconds
+  if (now - _lastTelegramPollTime >= TELEGRAM_POLL_INTERVAL) {
+    _lastTelegramPollTime = now;
+    pollTelegramUpdates();
+  }
+
+  // 2. Periodic polling to Marlin for filename, print time, and temps
   if (_isPrinting) {
-    if (now - _lastPollTime >= 12000) {  // Every 12 seconds while printing
+    if (now - _lastPollTime >= 12000) {
       _lastPollTime = now;
       if (_fileName == "Unknown" || _fileName.length() == 0) {
         esp3d_serial_service.writeBytes((const uint8_t*)"M27 C\n", 6);
@@ -293,23 +471,22 @@ void TelegramMonitor::handle() {
       esp3d_serial_service.writeBytes((const uint8_t*)"M31\n", 4);
     }
   } else {
-    if (now - _lastPollTime >= 30000) {  // Every 30 seconds while idle
+    if (now - _lastPollTime >= 30000) {
       _lastPollTime = now;
       esp3d_serial_service.writeBytes((const uint8_t*)"M105\n", 5);
     }
   }
 
-  // Detect print started
+  // 3. Detect print started
   if (_isPrinting && !_wasPrinting) {
     sendPrintStarted();
     _lastPrintUpdateTime = now;
     _wasPrinting = true;
-    // Request filename and print time right away
     esp3d_serial_service.writeBytes((const uint8_t*)"M27 C\n", 6);
     esp3d_serial_service.writeBytes((const uint8_t*)"M31\n", 4);
   }
 
-  // Detect print finished
+  // 4. Detect print finished
   if (!_isPrinting && _wasPrinting) {
     sendPrintFinished();
     _wasPrinting = false;
@@ -319,13 +496,13 @@ void TelegramMonitor::handle() {
     _lastIdleUpdateTime = now;
   }
 
-  // Periodic update while printing (every 1 minute)
+  // 5. Periodic update while printing (every 1 minute)
   if (_isPrinting && (now - _lastPrintUpdateTime >= TELEGRAM_PRINT_INTERVAL)) {
     sendStatusUpdate();
     _lastPrintUpdateTime = now;
   }
 
-  // Periodic update while idle (every 5 minutes)
+  // 6. Periodic update while idle (every 5 minutes)
   if (!_isPrinting && (now - _lastIdleUpdateTime >= TELEGRAM_IDLE_INTERVAL)) {
     sendIdleStatus();
     _lastIdleUpdateTime = now;

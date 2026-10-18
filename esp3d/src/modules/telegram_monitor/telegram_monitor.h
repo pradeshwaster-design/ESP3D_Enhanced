@@ -1,9 +1,11 @@
 /*
-  telegram_monitor.h - Periodic Telegram print status monitor
+  telegram_monitor.h - 2-Way Interactive Telegram Monitor & Remote Control
 
-  Custom module for ESP3D to send periodic print status updates via Telegram.
-  - While printing: updates every 1 minute with filename, elapsed time, estimated time left, %, Z, temps.
-  - While idle: updates every 5 minutes with printer idle status & temperatures.
+  Features:
+  - 2-Way Telegram Bot (remote commands: /status, /pause, /resume, /stop, /emergency, /temp, /cooldown, /help)
+  - 1-minute updates while printing (file name, elapsed time, estimated time left, progress, Z, temps)
+  - 5-minute idle status updates
+  - Instant print start & finish alerts
 */
 
 #ifndef _TELEGRAM_MONITOR_H
@@ -14,6 +16,7 @@
 // ── Configuration ────────────────────────────────────────
 #define TELEGRAM_PRINT_INTERVAL  60000   // 1 minute while printing (60,000 ms)
 #define TELEGRAM_IDLE_INTERVAL   300000  // 5 minutes when idle (300,000 ms)
+#define TELEGRAM_POLL_INTERVAL   3500    // Check incoming Telegram commands every 3.5s
 
 class TelegramMonitor {
  public:
@@ -29,6 +32,8 @@ class TelegramMonitor {
   uint32_t _lastPrintUpdateTime;
   uint32_t _lastIdleUpdateTime;
   uint32_t _lastPollTime;
+  uint32_t _lastTelegramPollTime;
+  int64_t _lastUpdateId;
   
   // Printer state parsed from serial stream
   bool _isPrinting;
@@ -48,6 +53,11 @@ class TelegramMonitor {
   void sendIdleStatus();
   void sendPrintStarted();
   void sendPrintFinished();
+  
+  // 2-Way Telegram methods
+  void pollTelegramUpdates();
+  void processTelegramCommand(String cmd, const String& fromId);
+  void sendTelegramReply(const String& text);
 };
 
 extern TelegramMonitor telegram_monitor;
