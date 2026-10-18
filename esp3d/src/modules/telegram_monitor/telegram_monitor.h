@@ -43,6 +43,7 @@ class TelegramMonitor {
   void handle();
   void parseSerialData(const uint8_t* data, size_t size);
   bool isUploading() const { return _uploadState != UPLOAD_IDLE; }
+  bool isUploadSerialCaller() const { return _isUploadSerialCaller; }
 
  private:
   bool _started;
@@ -72,6 +73,12 @@ class TelegramMonitor {
   uint32_t _uploadLastActivity;
   int _uploadInFlight;
   uint32_t _uploadLastOkTime;
+  bool _isUploadSerialCaller;
+  uint32_t _uploadLastProgressReportTime;
+  int _uploadLastProgressPct;
+  uint32_t _uploadRequestedResend;
+  uint32_t _uploadLastResendLine;
+  uint8_t _uploadResendCount;
 
   // Stop cooldown guard (suppresses trailing SD progress reports after /stop)
   uint32_t _stopCooldownUntil;
@@ -136,6 +143,7 @@ class TelegramMonitor {
   void sendPrinterInfoReply();
   void startFileUpload(const String& fileId, const String& fileName, uint32_t fileSize);
   void handleTelegramFileUpload();
+  void sendUploadSerial(const String& str);
 
   void pollTelegramUpdates();
   void processTelegramCommand(String cmd, const String& fromId);

@@ -59,6 +59,12 @@ TelegramMonitor::TelegramMonitor() {
   _uploadLastActivity = 0;
   _uploadInFlight = 0;
   _uploadLastOkTime = 0;
+  _isUploadSerialCaller = false;
+  _uploadLastProgressReportTime = 0;
+  _uploadLastProgressPct = 0;
+  _uploadRequestedResend = 0;
+  _uploadLastResendLine = 0;
+  _uploadResendCount = 0;
   _stopCooldownUntil = 0;
   _isPrinting = false;
   _wasPrinting = false;
@@ -125,6 +131,12 @@ void TelegramMonitor::begin() {
   _uploadLastActivity = 0;
   _uploadInFlight = 0;
   _uploadLastOkTime = 0;
+  _isUploadSerialCaller = false;
+  _uploadLastProgressReportTime = 0;
+  _uploadLastProgressPct = 0;
+  _uploadRequestedResend = 0;
+  _uploadLastResendLine = 0;
+  _uploadResendCount = 0;
   _stopCooldownUntil = 0;
   _isPaused = false;
   _isKilled = false;
@@ -249,18 +261,19 @@ void TelegramMonitor::parseSingleLine(const char* line) {
   // --- Marlin 'ok' flow control during upload ---
   if (d.startsWith("ok") || d.indexOf("ok") >= 0) {
     if (_uploadState == UPLOAD_STREAMING) {
-      if (_uploadInFlight > 0) _uploadInFlight--;
+      _uploadInFlight = 0;
       _uploadLastOkTime = millis();
     }
   }
 
-  // --- Marlin Resend / Line number desync auto-recovery ---
+  // --- Marlin Resend request parsing (decoupled from RX ISR) ---
   if (_uploadState == UPLOAD_STREAMING) {
-    if (d.indexOf("Resend:") >= 0 || d.indexOf("Line Number is not Last Line Number+1") >= 0) {
-      String sync = "M110 N" + String(_uploadLineNum) + "\n";
-      esp3d_serial_service.writeBytes((const uint8_t*)sync.c_str(), sync.length());
-      _uploadInFlight = 0;
-      _uploadLastOkTime = millis();
+    if (d.indexOf("Resend:") >= 0) {
+      int rPos = d.indexOf("Resend:");
+      int num = d.substring(rPos + 7).toInt();
+      if (num > 0) {
+        _uploadRequestedResend = num;
+      }
     }
   }
 
@@ -614,9 +627,9 @@ void TelegramMonitor::sendSDFileListReply() {
   String msg = "📁 SD Card Files (" + String(_sdFileCount) + "):\n\n";
   for (uint8_t i = 0; i < _sdFileCount; i++) {
     msg += String(i + 1) + ". " + _sdFiles[i] + "\n";
-    msg += "   ▶️ /print_" + String(i + 1) + "\n\n";
+    msg += "   ▶️ /print_" + String(i + 1) + "  🗑️ /del_" + String(i + 1) + "\n\n";
   }
-  msg += "Tap any /print_<n> link above to start printing!";
+  msg += "Tap /print_<n> to print, or /del_<n> to delete!";
   sendTelegramReply(msg);
 }
 
@@ -665,6 +678,12 @@ void TelegramMonitor::sendPrinterInfoReply() {
   sendTelegramReply(msg);
 }
 
+void TelegramMonitor::sendUploadSerial(const String& str) {
+  _isUploadSerialCaller = true;
+  esp3d_serial_service.writeBytes((const uint8_t*)str.c_str(), str.length());
+  _isUploadSerialCaller = false;
+}
+
 // ── Initialize G-code file upload from Telegram ───────────
 void TelegramMonitor::startFileUpload(const String& fileId, const String& fileName, uint32_t fileSize) {
   // Create clean 8.3 FAT filename for Marlin
@@ -688,9 +707,29 @@ void TelegramMonitor::startFileUpload(const String& fileId, const String& fileNa
   _uploadInFlight = 0;
   _uploadLastActivity = millis();
   _uploadLastOkTime = millis();
+  _uploadLastProgressReportTime = millis();
+  _uploadLastProgressPct = 0;
+  _uploadRequestedResend = 0;
+  _uploadLastResendLine = 0;
+  _uploadResendCount = 0;
+  _isUploadSerialCaller = false;
   _uploadState = UPLOAD_RESOLVE_URL;
 
-  sendTelegramReply("📥 Downloading from Telegram...\nFile: " + fileName + " (" + String(fileSize / 1024) + " KB)\nSaving as: " + _uploadSdName + "\nConnecting to storage...");
+  // Baud 115200 ~ 8,500 bytes/sec effective transmission with checksums
+  uint32_t estSec = (fileSize / 8500) + 1;
+  String estStr = "";
+  if (estSec >= 60) {
+    estStr = String(estSec / 60) + "m " + String(estSec % 60) + "s";
+  } else {
+    estStr = String(estSec) + "s";
+  }
+
+  String msg = "📥 Starting Telegram G-Code Upload\n\n";
+  msg += "📁 File: " + fileName + " (" + String(fileSize / 1024) + " KB)\n";
+  msg += "💾 Saving as: " + _uploadSdName + "\n";
+  msg += "⏳ Estimated transfer time: ~" + estStr + "\n\n";
+  msg += "⚠️ WARNING: Please DO NOT send any other files or commands until upload finishes!";
+  sendTelegramReply(msg);
 }
 
 // ── Non-blocking streaming of Telegram G-code upload to Marlin SD card ──
@@ -699,7 +738,7 @@ void TelegramMonitor::handleTelegramFileUpload() {
 
   // Inactivity timeout guard (15 seconds without receiving data)
   if (now - _uploadLastActivity > 15000) {
-    esp3d_serial_service.writeBytes((const uint8_t*)"\nM29\n", 5);
+    sendUploadSerial("\nM29\n");
     _uploadClient.stop();
     _uploadState = UPLOAD_IDLE;
     sendTelegramReply("❌ Upload timed out! Serial SD write cancelled.");
@@ -817,10 +856,10 @@ void TelegramMonitor::handleTelegramFileUpload() {
     }
 
     // Initialize Marlin line number counter and start SD saving
-    esp3d_serial_service.writeBytes((const uint8_t*)"M110 N0\n", 8);
+    sendUploadSerial("M110 N0\n");
     delay(50);
     String m28 = "M28 " + _uploadSdName + "\n";
-    esp3d_serial_service.writeBytes((const uint8_t*)m28.c_str(), m28.length());
+    sendUploadSerial(m28);
     delay(100);
 
     _uploadLineNum = 0;
@@ -829,6 +868,11 @@ void TelegramMonitor::handleTelegramFileUpload() {
     _uploadInFlight = 0;
     _uploadLastActivity = millis();
     _uploadLastOkTime = millis();
+    _uploadLastProgressReportTime = millis();
+    _uploadLastProgressPct = 0;
+    _uploadRequestedResend = 0;
+    _uploadLastResendLine = 0;
+    _uploadResendCount = 0;
     _uploadState = UPLOAD_STREAMING;
     return;
   }
@@ -843,7 +887,7 @@ void TelegramMonitor::handleTelegramFileUpload() {
         downloadComplete = true;
       } else {
         // Premature disconnection
-        esp3d_serial_service.writeBytes((const uint8_t*)"\nM29\n", 5);
+        sendUploadSerial("\nM29\n");
         _uploadClient.stop();
         _uploadState = UPLOAD_IDLE;
         sendTelegramReply("❌ Upload interrupted: server disconnected after " + String(_uploadBytesSent / 1024) + " KB of " + String(_uploadFileSize / 1024) + " KB.\nSD file closed.");
@@ -869,15 +913,15 @@ void TelegramMonitor::handleTelegramFileUpload() {
             uint8_t cs = 0;
             for (size_t i = 0; i < cmd.length(); i++) cs ^= (uint8_t)cmd.charAt(i);
             String out = cmd + "*" + String(cs) + "\n";
-            esp3d_serial_service.writeBytes((const uint8_t*)out.c_str(), out.length());
-            _uploadInFlight++;
+            sendUploadSerial(out);
+            _uploadInFlight = 1;
             _uploadLastOkTime = millis();
           }
         }
       }
 
       // Wait briefly for in-flight commands to be confirmed by Marlin's 'ok'
-      if (_uploadInFlight > 0 && (now - _uploadLastOkTime < 600)) {
+      if (_uploadInFlight > 0 && (now - _uploadLastOkTime < 2000)) {
         return; // Wait next cycle for Marlin ok
       }
 
@@ -888,30 +932,75 @@ void TelegramMonitor::handleTelegramFileUpload() {
       uint8_t m29cs = 0;
       for (size_t i = 0; i < m29cmd.length(); i++) m29cs ^= (uint8_t)m29cmd.charAt(i);
       String m29out = m29cmd + "*" + String(m29cs) + "\nM29\n";
-      esp3d_serial_service.writeBytes((const uint8_t*)m29out.c_str(), m29out.length());
+      sendUploadSerial(m29out);
       delay(100);
 
       _uploadClient.stop();
       _uploadState = UPLOAD_IDLE;
 
-      String reply = "✅ Upload Successful!\n\n";
-      reply += "File: " + _uploadSdName + "\n";
-      reply += "Commands saved: " + String(_uploadLineNum - 1) + "\n";
-      reply += "Downloaded: " + String(_uploadBytesSent / 1024) + " KB\n";
-      reply += "Complete toolpath & shutdown sequence verified on SD.\n\n";
+      String reply = "✅ File Uploaded Successfully!\n\n";
+      reply += "📁 SD File: " + _uploadSdName + "\n";
+      reply += "📏 Size: " + String(_uploadFileSize / 1024) + " KB (" + String(_uploadLineNum - 1) + " commands)\n";
+      reply += "💾 Saved and verified on printer SD card.\n\n";
       reply += "To start printing now, tap:\n";
       reply += "▶️ /print " + _uploadSdName;
       sendTelegramReply(reply);
       return;
     }
 
-    // Safety timeout: if Marlin hasn't sent 'ok' in 400ms, recover flow control
-    if (_uploadInFlight > 0 && (now - _uploadLastOkTime > 400)) {
-      _uploadInFlight = 0;
+    // Safety timeout: if Marlin hasn't sent 'ok' in 8000ms, abort cleanly
+    if (_uploadInFlight > 0 && (now - _uploadLastOkTime > 8000)) {
+      sendUploadSerial("\nM29\n");
+      _uploadClient.stop();
+      _uploadState = UPLOAD_IDLE;
+      sendTelegramReply("❌ Upload timed out: printer did not acknowledge within 8s. SD file closed.");
+      return;
     }
 
-    // Stream lines with Ping-Pong flow control (_uploadInFlight < 2)
-    while (_uploadClient.available() && _uploadInFlight < 2 && _uploadBytesSent < _uploadFileSize) {
+    // Resend recovery if Marlin requested a line resync
+    if (_uploadRequestedResend > 0) {
+      if (_uploadRequestedResend == _uploadLastResendLine) {
+        _uploadResendCount++;
+      } else {
+        _uploadLastResendLine = _uploadRequestedResend;
+        _uploadResendCount = 1;
+      }
+
+      if (_uploadResendCount > 3) {
+        sendUploadSerial("\nM29\n");
+        _uploadClient.stop();
+        _uploadState = UPLOAD_IDLE;
+        sendTelegramReply("❌ Upload failed: repeated sync errors at line " + String(_uploadRequestedResend) + ". SD file closed.");
+        return;
+      }
+
+      // Send checksummed M110 matching Marlin's expected line number
+      String syncCmd = "N" + String(_uploadRequestedResend) + " M110 N" + String(_uploadLineNum);
+      uint8_t cs = 0;
+      for (size_t i = 0; i < syncCmd.length(); i++) cs ^= (uint8_t)syncCmd.charAt(i);
+      String syncOut = syncCmd + "*" + String(cs) + "\n";
+      sendUploadSerial(syncOut);
+      _uploadRequestedResend = 0;
+      _uploadInFlight = 1;
+      _uploadLastOkTime = millis();
+      return;
+    }
+
+    // Periodic progress updates every 25% for large files
+    if (_uploadFileSize > 0) {
+      int pct = (int)((_uploadBytesSent * 100ULL) / _uploadFileSize);
+      if (pct >= _uploadLastProgressPct + 25 && (now - _uploadLastProgressReportTime >= 15000)) {
+        _uploadLastProgressPct = (pct / 25) * 25;
+        _uploadLastProgressReportTime = now;
+        uint32_t bytesLeft = (_uploadFileSize > _uploadBytesSent) ? (_uploadFileSize - _uploadBytesSent) : 0;
+        uint32_t secLeft = (bytesLeft / 8500) + 1;
+        String remStr = (secLeft >= 60) ? (String(secLeft / 60) + "m " + String(secLeft % 60) + "s") : (String(secLeft) + "s");
+        sendTelegramReply("⏳ Uploading " + _uploadSdName + ": " + String(pct) + "% (" + String(_uploadBytesSent / 1024) + "/" + String(_uploadFileSize / 1024) + " KB)\n~" + remStr + " remaining...");
+      }
+    }
+
+    // Stream lines with strict Ping-Pong flow control: wait for Marlin 'ok' (_uploadInFlight == 0)
+    while (_uploadClient.available() && _uploadInFlight == 0 && _uploadBytesSent < _uploadFileSize) {
       char c = _uploadClient.read();
       _uploadBytesSent++;
       _uploadLastActivity = millis();
@@ -942,9 +1031,10 @@ void TelegramMonitor::handleTelegramFileUpload() {
           cs ^= (uint8_t)cmd.charAt(i);
         }
         String out = cmd + "*" + String(cs) + "\n";
-        esp3d_serial_service.writeBytes((const uint8_t*)out.c_str(), out.length());
-        _uploadInFlight++;
+        sendUploadSerial(out);
+        _uploadInFlight = 1;
         _uploadLastOkTime = millis();
+        break; // Wait for Marlin's 'ok' before streaming next line
       } else {
         if (_uploadLineBuffer.length() < 160) {
           _uploadLineBuffer += c;
@@ -969,7 +1059,7 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
   // ── Emergency Stop (Always allowed) ──
   if (lc == "/emergency") {
     if (_uploadState != UPLOAD_IDLE) {
-      esp3d_serial_service.writeBytes((const uint8_t*)"\nM29\n", 5);
+      sendUploadSerial("\nM29\n");
       _uploadClient.stop();
       _uploadState = UPLOAD_IDLE;
     }
@@ -1118,8 +1208,12 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     msg += "/home_x — Home X axis\n";
     msg += "/home_y — Home Y axis\n";
     msg += "/home_z — Home Z axis\n\n";
-    msg += "📁 FILE UPLOAD:\n";
-    msg += "Send any .gcode file to this chat to save directly to the printer SD card!\n\n";
+    msg += "📁 FILE MANAGEMENT:\n";
+    msg += "/files — Browse SD card files\n";
+    msg += "/print_1 — Print file by number\n";
+    msg += "/del_1 — Delete file by number\n";
+    msg += "/delete <file> — Delete by filename\n";
+    msg += "Send any .gcode to chat to upload to SD!\n\n";
     msg += "🔄 RECOVERY:\n";
     msg += "/reboot — Test/restart (M999)\n";
     msg += "Power switch OFF->ON to reset halt";
@@ -1354,7 +1448,7 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
   // ── Stop (M876 S1 + M108 + M524 + Cooldown) ──
   else if (lc == "/stop") {
     if (_uploadState != UPLOAD_IDLE) {
-      esp3d_serial_service.writeBytes((const uint8_t*)"\nM29\n", 5);
+      sendUploadSerial("\nM29\n");
       _uploadClient.stop();
       _uploadState = UPLOAD_IDLE;
       sendTelegramReply("Upload cancelled and SD file closed.");
@@ -1424,6 +1518,57 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     _totalLayers = 0;
     _printTime = "";
     sendTelegramReply("Starting print: " + selectedFile);
+  }
+  // ── Delete a file: /del <n|file>, /del_<n>, /delete <n|file>, /delete_<n> ──
+  else if (lc.startsWith("/del_") || lc.startsWith("/del ") || lc == "/del" ||
+           lc.startsWith("/delete_") || lc.startsWith("/delete ") || lc == "/delete") {
+    String arg;
+    if (lc.startsWith("/del_")) arg = cmd.substring(5);
+    else if (lc.startsWith("/del ")) arg = cmd.substring(5);
+    else if (lc.startsWith("/delete_")) arg = cmd.substring(8);
+    else if (lc.startsWith("/delete ")) arg = cmd.substring(8);
+    else {
+      sendTelegramReply("Usage: /del_1 or /del <filename>\nType /files to see list.");
+      return;
+    }
+    arg.trim();
+    if (arg.length() == 0) {
+      sendTelegramReply("Usage: /del_1 or /del <filename>\nType /files to see list.");
+      return;
+    }
+    if (_isPrinting || _isPaused) {
+      sendTelegramReply("⚠️ Cannot delete files while printer is printing or paused!");
+      return;
+    }
+    String targetFile = "";
+    bool isNum = true;
+    for (size_t i = 0; i < arg.length(); i++) {
+      if (!isDigit(arg.charAt(i))) { isNum = false; break; }
+    }
+    if (isNum) {
+      int idx = arg.toInt() - 1;
+      if (idx >= 0 && idx < _sdFileCount) {
+        targetFile = _sdFiles[idx];
+      } else {
+        sendTelegramReply("Invalid file number. Type /files to see available files.");
+        return;
+      }
+    } else {
+      targetFile = arg;
+    }
+    // In Marlin, M30 <filename> deletes the specified file from the SD card
+    String m30 = "M30 " + targetFile + "\n";
+    esp3d_serial_service.writeBytes((const uint8_t*)m30.c_str(), m30.length());
+    sendTelegramReply("🗑️ Deleting " + targetFile + " from SD card...\nRefreshing file list (use /files to verify).");
+
+    // Automatically trigger SD file refresh
+    _sdFileCount = 0;
+    _collectingFiles = false;
+    _pendingFilesRequest = false;
+    _readyToSendFileList = false;
+    delay(100);
+    esp3d_serial_service.writeBytes((const uint8_t*)"M20\n", 4);
+    return;
   }
   else if (lc.startsWith("/")) {
     sendTelegramReply("Unknown command. Type /help for list.");

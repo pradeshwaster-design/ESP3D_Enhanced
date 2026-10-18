@@ -108,6 +108,13 @@ size_t ESP3DSerialService::writeBytes(const uint8_t *buffer, size_t size) {
   if (!_started) {
     return 0;
   }
+#if defined(NOTIFICATION_FEATURE)
+  // If Telegram G-code upload is streaming over serial to SD card, lock the serial port
+  // and discard ANY background queries (e.g. M105, M114, M27 from web dashboard)
+  if (telegram_monitor.isUploading() && !telegram_monitor.isUploadSerialCaller()) {
+    return size; // Discard non-upload serial traffic during upload
+  }
+#endif
   if ((uint)Serials[_serialIndex]->availableForWrite() >= size) {
     return Serials[_serialIndex]->write(buffer, size);
   } else {
