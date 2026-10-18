@@ -1,13 +1,14 @@
 /*
   telegram_monitor.h - 2-Way Interactive Telegram Monitor & Remote Control
   
-  V4 - Marlin Host Prompt & Filament Control:
-  - M876 S1 + M108 prompt handling (breaks Purge More / Continue loop completely)
-  - Full filament management: /load, /unload with cold extrusion safety checks
-  - Temperature presets & direct controls: /preheat pla, /preheat petg, /temp <deg>, /bed <deg>
-  - Prompt commands: /continue, /purge
-  - LCD prompt tracking via //action:prompt_*
-  - Safe deferred network execution & heap stability
+  V5 - Clickable Telegram commands, M112 Halt tracking, Strict command validation:
+  - Clickable single-tap commands (no spaces): /preheat_pla, /preheat_petg, /home_all, /print_<n>
+  - Direct SD print links (/print_1, /print_2...)
+  - Separate /temp (query) vs /hotend <deg> (set hotend) vs /bed <deg> (set bed)
+  - Strict rules for /purge and /continue (cold extrusion check + pause validation)
+  - Marlin M112 emergency halt detection & state lock (_isKilled)
+  - Recovery commands: /reboot (M999) and /clear_halt
+  - Clean, interactive, emoji-formatted /help
 */
 
 #ifndef _TELEGRAM_MONITOR_H
@@ -48,6 +49,7 @@ class TelegramMonitor {
   bool _isPrinting;
   bool _wasPrinting;
   bool _isPaused;               // True when M25 pause is active
+  bool _isKilled;               // True when M112 emergency stop / Marlin halt is active
   String _fileName;
   float _hotendActual;
   float _hotendTarget;
