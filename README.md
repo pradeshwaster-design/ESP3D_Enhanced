@@ -1,250 +1,189 @@
-# ESP3D-Enhanced — Remote 3D Printer Control & Monitoring
+# ESP3D 3.0 ![ESP3D](https://img.shields.io/badge/dynamic/json?label=ESP3D&query=$.version&url=https://raw.githubusercontent.com/luc-github/ESP3D/refs/heads/3.0/info.json)
+<!-- ALL-CONTRIBUTORS-BADGE:START - Do not remove or modify this section -->
+[![All Contributors](https://img.shields.io/badge/all_contributors-2-orange.svg?style=flat-square)](#contributors-)
+<!-- ALL-CONTRIBUTORS-BADGE:END -->
+<img src="https://github.com/luc-github/ESP3D/blob/3.0/images/Screen/logo2.png">
+Firmware for ESP8266/ESP8285 and ESP32 (original, pico, S2, S3, C3, C6) used with 3D printer/Sand-Table and CNC 
 
-<p align="center">
-  <b>WiFi Bridge + 2-Way Telegram Bot for Ender 3 + SKR Mini E3 V3.0 + ESP32-WROOM-DA</b>
-</p>
+To compile ESP3D you need to edit the configuration.h according your needs.   
+You can also generate it, using [![Development  Version](https://img.shields.io/badge/ESP3D-Configurator-red?style=for-the-badge&logo=preact)](https://luc-github.github.io/) which simplify a lot this step.   
+or click here: https://luc-github.github.io/      
 
-<p align="center">
-  <a href="https://github.com/pradeshwaster-design/ESP3D-Enhanced-/commits/main"><img src="https://img.shields.io/badge/Version-v7.0-blue?style=for-the-badge"/></a>
-  <a href="https://github.com/pradeshwaster-design/ESP3D-Enhanced-/commits/main"><img src="https://img.shields.io/badge/Last%20Commit-main-green?style=for-the-badge"/></a>
-  <a href="https://opensource.org/licenses/GPL-3.0"><img src="https://img.shields.io/badge/License-GPLv3-yellow?style=for-the-badge"/></a>
-</p>
+ESP3D 3.0 use [![Development  Version](https://img.shields.io/badge/Devt-v3.0-yellow?style=plastic&label=ESP3D-WEBUI)](https://github.com/luc-github/ESP3D-WEBUI/tree/3.0), but it is built according your system and your system firmware:[![Development  Version](https://img.shields.io/badge/Devt-v3.0-yellow?style=plastic&label=WebUI%20Packages)](https://github.com/luc-github/ESP3D-WEBUI/tree/3.0/dist/). 
 
----
+so you need to use the right one, the [ESP3D-Configurator](https://luc-github.github.io/) may also help you to download the correct version for your needs.
 
-## 📖 Overview
-
-**ESP3D-Enhanced** is open-source firmware for **ESP8266**, **ESP8285**, and **ESP32** microcontrollers that adds Wi-Fi connectivity, web control, and remote monitoring to 3D printers, CNC machines, and laser engravers.
-
-### Tested Hardware Setup
-| Component | Model |
-|-----------|-------|
-| 3D Printer | Creality Ender 3 |
-| Controller Board | SKR Mini E3 V3.0 |
-| WiFi Bridge | ESP32-WROOM-DA (240MHz) |
-| Firmware | Marlin 2.1.x |
-| Flash Scheme | Minimal SPIFFS (1.9MB APP + OTA / 190KB SPIFFS) |
-
-Monitor prints remotely, upload G-code files from Telegram, tune speed/flow/fan live, control your printer via 2-way Telegram bot, and view everything on the ESP3D web dashboard — all from your phone or PC.
-
-## ✨ Features
-
-### 📱 2-Way Telegram Bot
-Send commands from anywhere and get instant replies:
-
-| Command | Action | G-Code Sent |
-|---------|--------|-------------|
-| `/status` | Live print progress, %, filename, temps, Z, time left | Serial read |
-| `/pos` | Current toolhead coordinates | `M114` |
-| `/display` | Everything on the printer LCD screen | Serial read |
-| `/temp` | Live hotend & bed temperatures | Serial read |
-| `/files` | List `.gcode` files on SD card | `M21`, `M20` |
-| `/print <num\|name>` | Select and start printing a file | `M23`, `M24` |
-| `/pause` | Safely pause mid-layer | `M25` |
-| `/resume` | Resume from paused state | `M108` |
-| `/stop` | Cancel and abort current print | `M108`, `M524`, `M104 S0`, `M140 S0` |
-| `/emergency` | Immediate emergency kill | `M112` |
-| `/cooldown` | Turn off hotend & bed | `M104 S0`, `M140 S0` |
-| `/preheat pla` | Preheat to PLA temps (200°C/60°C) | `M104 S200`, `M140 S60` |
-| `/preheat petg` | Preheat to PETG temps (240°C/75°C) | `M104 S240`, `M140 S75` |
-| `/temp <deg>` | Set hotend temperature (max 260°C) | `M104 S<deg>` |
-| `/bed <deg>` | Set bed temperature (max 100°C) | `M140 S<deg>` |
-| `/speed <pct>` | Print speed override (10–300%) | `M220 S<pct>` |
-| `/flow <pct>` | Extrusion multiplier (50–150%) | `M221 S<pct>` |
-| `/fan <pct>` | Part cooling fan (0–100%) | `M106 S<pwm>` |
-| `/zoffset <+/-mm>` | Live Z-babystepping (-2 to +2 mm) | `M290 Z<val>` |
-| `/load` | Load filament (hotend ≥170°C) | `G91`, `M83`, `G1 E60 F150`, `G90` |
-| `/unload` | Unload filament (hotend ≥170°C) | `G91`, `M83`, `G1 E10 F200`, ... |
-| `/continue` | Continue from LCD prompt | `M876 S1`, `M108` |
-| `/purge` | Purge more filament | `M876 S0` |
-| `/info` | Full system diagnostics report | Serial read |
-| `/help` | Show full command list | — |
-
-### 📁 Direct G-Code Upload from Telegram (V7)
-Upload `.gcode` files directly from Telegram to the printer's onboard SD card:
-1. Send any `.gcode` file in your Telegram chat with the bot
-2. Bot downloads it chunk-by-chunk over WiFi
-3. Streams to SD via `M28`, closes with `M29`
-4. Bot replies with clickable `▶️ /print FILENAME.GCO`
-5. Best for files under 5 MB (115200 baud UART limit)
+![Development](https://img.shields.io/badge/dynamic/json?label=Development&query=$.devt&color=green&style=plastic&url=https://raw.githubusercontent.com/luc-github/ESP3D/refs/heads/3.0/info.json)
+[![Development  Version](https://img.shields.io/badge/Devt-v3.0-yellow?style=plastic&label=ESP3D-WEBUI)](https://github.com/luc-github/ESP3D-WEBUI/tree/3.0)
+![GitHub last commit (branch)](https://img.shields.io/github/last-commit/luc-github/ESP3D/3.0?style=plastic)
+[![github-ci](https://github.com/luc-github/ESP3D/workflows/build-ci/badge.svg)](https://github.com/luc-github/ESP3D/actions/workflows/build-ci.yml)
 
 
-### 🌐 Web Interface
-- Full WebUI control panel
-- Embedded maintenance page (terminal, filesystem, firmware updates)
-- OTA (Over-the-Air) updates
-- Configuration via INI file on SD card
-- mDNS auto-discovery (`http://esp3d.local`)
+Please go to [esp3d.io](http://esp3d.io/esp3d/v3.x/index.html) for documentation and installation
 
-### 💾 Storage & File Management
-- SD Card — Native SPI, SDIO (ESP32), SDFat 1.x & 2.x
-- Local Filesystem — LittleFS (recommended), FAT (ESP32), SPIFFS
-- FTP support — network file transfer
-- WebDAV support — remote filesystem access
-- Global FS — unified SD + Local FS view under FTP/WebDAV
+> [!WARNING]
+>### Disclaimer
+> The software is provided 'as is,' without any warranty of any kind, expressed or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the software or the use or other dealings in the software.
+>It is essential that you carefully read and understand this disclaimer before using this software and its components. If you do not agree with any part of this disclaimer, please refrain from using the software.  
 
+# SSDP Discovery tools
+   * Windows : 
+       - Just go to Network page
+   * OSX : TBD
+   * Linux :
+       - On Debian-style distros, install `gupnp-tools` and run `gssdp-discover -i <devicename> --timeout=3`
+   * Android :
+       - SSDP/UPnP Scanner : https://play.google.com/store/apps/details?id=com.vgc.ssdpscan
+       
 
----
-
-## 🛠️ Supported Hardware
-
-| Platform | Boards |
-|----------|--------|
-| ESP8266 / ESP8285 | ESP-01, NodeMCU, Wemos D1 Mini |
-| ESP32 | Original, Pico, S2, S3, C3, C6 |
-| Displays | SSD1306, SH1106 OLED; ST7789 TFT |
-| Storage | SD Card (SPI/SDIO), LittleFS, FAT, SPIFFS |
-
----
-
-## 🚀 Quick Start
-
-### Option A: Arduino IDE (Recommended for ESP32)
-
-1. Open **Arduino IDE**
-2. Open: `esp3d/esp3d.ino`
-3. Board settings:
-   - **Board:** `ESP32 Dev Module`
-   - **Partition Scheme:** `Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)`
-   - **Upload Speed:** `921600`
-   - **Port:** `COM6` (or your ESP32 port)
-4. Click **Upload**
-
-### Option B: PlatformIO
-
-```bash
-git clone https://github.com/pradeshwaster-design/ESP3D-Enhanced-.git
-cd ESP3D-Enhanced-
-pip install platformio
-pio run
-pio run -t upload
-pio run -t uploadfs
-pio device monitor
-```
-
-### First Boot
-1. Power on your ESP3D device
-2. Connect to the ESP3D Wi-Fi access point
-3. Open `http://esp3d.local` in your browser
-4. Configure Wi-Fi, printer settings, and preferences via WebUI
-
-
-
----
-
-## 📁 Repository Structure
-
-```
-ESP3D-Enhanced/
-├── esp3d/              # Main firmware source
-│   ├── src/            # Source code
-│   │   ├── core/       # Core ESP3D engine
-│   │   ├── include/    # Configuration headers
-│   │   └── modules/    # Feature modules (WiFi, FTP, WebUI, Telegram, etc.)
-│   └── data/           # WebUI files and filesystem assets
-├── embedded/           # Embedded web assets
-├── libraries/          # External Arduino libraries
-├── lua_script_examples/# Example Lua scripts
-├── platformIO/         # PlatformIO build scripts
-├── tools/              # Utility tools
-├── docs/               # Documentation
-├── images/             # Repository assets
-├── platformio.ini      # PlatformIO project configuration
-├── info.json           # Version information
-└── README.md           # This file
-```
-
----
-
----
-
-## 📦 Installation Options
-
-### Using ESP3D-Configurator
-Use the [ESP3D-Configurator](https://luc-github.github.io/) web tool to generate your `configuration.h` and download the correct firmware binary for your hardware.
-
-### Manual Build
-1. Clone this repository
-2. Open in VS Code with PlatformIO extension OR Arduino IDE
-3. Select your environment in `platformio.ini` (or configure board in Arduino IDE)
-4. Build and upload via PlatformIO or Arduino IDE
-
----
-
-## 📚 Documentation
-
-Visit **[esp3d.io](http://esp3d.io/esp3d/v3.x/index.html)** for full documentation, installation guides, and API references.
-
----
-
-## 🐛 Bug Fixes & Known Issues
-
-| Bug | Symptom | Fix |
-|-----|---------|-----|
-| Double "Hi, esp3d is online" on boot | First poll fetches all old messages, crashes ESP32 | Added `_skipFirstPoll` flag — discards stale messages on first poll |
-| `/print` causes crash | Rapid SSL handshakes exhaust heap | Process commands in separate `handle()` cycle from poll |
-| Pause triggers false "Print Finished" | Marlin reports "Not SD printing" on M27 during pause | Added `_isPaused` state tracking |
-| `/resume` / `/stop` don't work when paused | Marlin's `wait_for_user` loop blocks serial commands | Use `M108` (EMERGENCY_PARSER) instead of `M24`/`M524` alone |
-| `/display` shows "Message: 0s" | M117 parser matches stale echoes | Only parse M117 when line starts with "echo:" or "M117" |
-
-### Correct Marlin Serial Commands (Research-Confirmed)
-
-| Action | Correct G-Code | Why |
-|--------|---------------|-----|
-| Pause | `M25` | Parks nozzle, retracts, enters `wait_for_user` |
-| Resume | `M108` | Breaks `wait_for_user` via EMERGENCY_PARSER; Marlin auto-resumes |
-| Cancel | `M108` → `M524` → `M104 S0` → `M140 S0` | Breaks wait, aborts SD, cools down |
-| Emergency | `M112` | Immediate kill via EMERGENCY_PARSER |
-
-> **Important:** `M24` alone does **NOT** resume when paused! Marlin's blocking `wait_for_user` loop prevents `M24` from being processed. `M108` is the only way to break out via serial.
-
-
-## 🔧 Configuration
-
-ESP3D is configured through multiple layers:
-
-| Layer | File | Purpose |
-|-------|------|---------|
-| Compile-time | `esp3d/src/include/esp3d_config.h` | Feature flags, pin assignments, debug level |
-| Build | `platformio.ini` | Build environment, upload speed, board, filesystem |
-| Runtime | WebUI (`http://esp3d.local`) | Wi-Fi credentials, Telegram token, printer settings |
-| Deployment | INI file on SD card | Configuration file for easy deployment |
-
----
-
-## 🗺️ Upgrade Roadmap
-
-### Tier 1 — Zero Cost, Software Only (Do These Now)
-1. **2-Way Telegram Bot** — Interactive control from anywhere (`/status`, `/pause`, `/resume`, `/stop`, `/emergency`, `/temp`, `/cooldown`, `/lights on`)
-2. **Power Failure Resume (M413)** — Add `M413 S1` to Cura start G-code
-3. **Telegram Thermal Runaway Alert** — Alert if hotend deviates >15°C from target
-4. **Tailscale Remote Access** — Access ESP3D dashboard from anywhere (4G/5G), zero port forwarding
-
-### Tier 2 — Low Cost Hardware (Under ₹500 each)
-5. **ESP32-CAM Module** (~₹350–500) — Live MJPEG stream, `/photo` command, AI spaghetti detection ready
-6. **Filament Runout Sensor** (~₹200–350) — Auto-pause on filament outage, resume via Telegram
-7. **Smart Plug / Tasmota Plug** (~₹400–800) — Auto power-off after print completes
-8. **DHT22 / BME280 Sensor** (~₹150) — Enclosure temperature & humidity monitoring
-
-### Tier 3 — Medium Investment (~₹800–1200)
-9. **ESP32-S3 N16R8 Upgrade** — 16MB Flash + 8MB PSRAM, runs everything standalone on one chip
-10. **AI Failure Detection** — TensorFlow Lite on ESP32-S3 + ESP32-CAM, auto-pause on spaghetti detection
-
-### Recommended Order
-```
-START → 2-Way Telegram Bot → Thermal Runaway Alert → Power Failure Resume → Tailscale
-      → Filament Runout Sensor → ESP32-CAM → Smart Plug → DHT22 Sensor
-      → ESP32-S3 N16R8 → AI Spaghetti Detection
-```
-
----
-
-## 📄 License
-
-This project is licensed under the **GPL-3.0 License**. See the [LICENSE](LICENSE) file for details.
-
----
-
+## Sponsors 
 <div align="center">
-  <b>ESP3D-Enhanced</b> — Remote control & monitoring for your 3D printer via Telegram & WebUI
+   <div style="display:flex; flex-wrap:wrap; gap:20px; justify-content:center; margin-bottom:20px">
+       <a href="https://luc-github.github.io/sponsors/esp3d/diamond-0.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/diamond-0.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/diamond-1.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/diamond-1.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/diamond-2.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/diamond-2.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/diamond-3.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/diamond-3.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/diamond-4.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/diamond-4.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/diamond-5.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/diamond-5.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/diamond-6.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/diamond-6.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/diamond-7.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/diamond-7.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/diamond-8.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/diamond-8.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/diamond-9.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/diamond-9.svg" style="max-width:400px; width:auto; height:auto"></a>
+   </div>
+   <div style="display:flex; flex-wrap:wrap; gap:20px; justify-content:center; margin-bottom:20px">
+       <a href="https://luc-github.github.io/sponsors/esp3d/platinum-0.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/platinum-0.svg?v=1" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/platinum-1.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/platinum-1.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/platinum-2.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/platinum-2.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/platinum-3.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/platinum-3.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/platinum-4.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/platinum-4.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/platinum-5.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/platinum-5.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/platinum-6.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/platinum-6.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/platinum-7.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/platinum-7.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/platinum-8.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/platinum-8.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/platinum-9.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/platinum-9.svg" style="max-width:400px; width:auto; height:auto"></a>
+   </div>
+   <div style="display:flex; flex-wrap:wrap; gap:20px; justify-content:center; margin-bottom:20px">
+       <a href="https://luc-github.github.io/sponsors/esp3d/gold-0.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/gold-0.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/gold-1.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/gold-1.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/gold-2.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/gold-2.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/gold-3.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/gold-3.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/gold-4.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/gold-4.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/gold-5.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/gold-5.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/gold-6.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/gold-6.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/gold-7.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/gold-7.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/gold-8.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/gold-8.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/gold-9.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/gold-9.svg" style="max-width:400px; width:auto; height:auto"></a>
+   </div>
+   <div style="display:flex; flex-wrap:wrap; gap:20px; justify-content:center; margin-bottom:20px">
+       <a href="https://luc-github.github.io/sponsors/esp3d/silver-0.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/silver-0.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/silver-1.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/silver-1.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/silver-2.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/silver-2.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/silver-3.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/silver-3.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/silver-4.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/silver-4.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/silver-5.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/silver-5.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/silver-6.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/silver-6.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/silver-7.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/silver-7.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/silver-8.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/silver-8.svg" style="max-width:400px; width:auto; height:auto"></a>
+       <a href="https://luc-github.github.io/sponsors/esp3d/silver-9.html" target="_blank" rel="noopener noreferrer"><img src="https://luc-github.github.io/sponsors/esp3d/silver-9.svg" style="max-width:400px; width:auto; height:auto"></a>
+   </div>
+   Support ESP3D Development - <a href="https://esp3d.io/sponsoring" target="_blank" rel="noopener noreferrer">Become a Sponsor</a>
 </div>
+
+
+# Chat
+
+Please use discord : [![discord](https://img.shields.io/discord/752822148795596940?color=blue&label=discord&logo=discord)](https://discord.gg/Z4ujTwE)
+
+# Credits: embedded code / inspiration code
+
+- FTP server come from Jean-Michel Gallego https://github.com/gallegojm/Arduino-Ftp-Server
+- WebDav server come from David Gauchard https://github.com/d-a-v/ESPWebDAV
+- Mks support come from https://github.com/makerbase-mks/MKS-WIFI
+- Line support come from https://github.com/TridentTD/TridentTD_LineNotify and https://notify-bot.line.me/doc/en/ and https://pushover.net/api
+- Pushover support come from https://github.com/ArduinoHannover/Pushover
+- Email support come from https://github.com/CosmicBoris/ESP8266SMTP and https://www.electronicshub.org/send-an-email-using-esp8266/
+- Telegram support come from https://medium.com/@xabaras/sending-a-message-to-a-telegram-channel-the-easy-way-eb0a0b32968
+- HomeAssistant support come from https://developers.home-assistant.io/docs/api/rest/
+
+# Credits: libraries
+
+- Websockets come from Markus Sattler https://github.com/Links2004/arduinoWebSockets
+- BMx280MI come from Gregor Christandl https://bitbucket.org/christandlg/bmx280mi
+- DHT sensor come from beegee_tokyo http://desire.giesecke.tk/index.php/2018/01/30/esp32-dht11/
+- ESP32SSDP come from luc-github https://github.com/luc-github/ESP32SSDP
+- ESP8266-Arduino-Lua come from François Dugast but esp8266/esp32 compatible version is here https://github.com/luc-github/ESP8266-Arduino-Lua as PR is not merged
+- ESP8266 and ESP32 Oled Driver for SSD1306 display come from Daniel Eichhorn, Fabrice Weinberg https://github.com/ThingPulse/esp8266-oled-ssd1306
+- LittleFS_esp32 come from lorol https://github.com/lorol/LITTLEFS
+- lv_arduino come from Pavel Brychta <pablo@xpablo.cz> https://littlevgl.com
+- SdFat come from Bill Greiman https://github.com/greiman/SdFat
+- TFT_eSPI come from Bodmer https://github.com/Bodmer/TFT_eSPI
+- ESP8266 core come from https://github.com/esp8266/Arduino
+- ESP32 core come from https://github.com/espressif/arduino-esp32
+
+
+## Contributors ✨
+
+Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/docs/en/emoji-key)):
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/BerranRemzi"><img src="https://avatars.githubusercontent.com/u/11856339?v=4?s=100" width="100px;" alt="Berran Remzi"/><br /><sub><b>Berran Remzi</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/issues?q=author%3ABerranRemzi" title="Bug reports">🐛</a> <a href="https://github.com/luc-github/ESP3D/commits?author=BerranRemzi" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Binch3000"><img src="https://avatars.githubusercontent.com/u/168651837?v=4?s=100" width="100px;" alt="Binch3000"/><br /><sub><b>Binch3000</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/issues?q=author%3ABinch3000" title="Bug reports">🐛</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
+<!-- ALL-CONTRIBUTORS-LIST:START - Do not remove or modify this section -->
+<!-- prettier-ignore-start -->
+<!-- markdownlint-disable -->
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://ponc.tech"><img src="https://avatars.githubusercontent.com/u/1230627?v=4?s=100" width="100px;" alt="Harald Wagener"/><br /><sub><b>Harald Wagener</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=oliof" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/A7F"><img src="https://avatars.githubusercontent.com/u/17254471?v=4?s=100" width="100px;" alt="Luke"/><br /><sub><b>Luke</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=A7F" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/atsju"><img src="https://avatars.githubusercontent.com/u/4628382?v=4?s=100" width="100px;" alt="Julien Staub"/><br /><sub><b>Julien Staub</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=atsju" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="http://kingbain.com"><img src="https://avatars.githubusercontent.com/u/367922?v=4?s=100" width="100px;" alt="John Bain"/><br /><sub><b>John Bain</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=KingBain" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Xstasy"><img src="https://avatars.githubusercontent.com/u/283593?v=4?s=100" width="100px;" alt="Xstasy"/><br /><sub><b>Xstasy</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=Xstasy" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://www.upwork.com/freelancers/~016e4c7416f7d925c8"><img src="https://avatars.githubusercontent.com/u/171243?v=4?s=100" width="100px;" alt="Семён Марьясин"/><br /><sub><b>Семён Марьясин</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=MarSoft" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://encrypted.pcode.nl/"><img src="https://avatars.githubusercontent.com/u/929583?v=4?s=100" width="100px;" alt="Pascal de Bruijn"/><br /><sub><b>Pascal de Bruijn</b></sub></a><br /><a href="#ideas-pmjdebruijn" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/luc-github/ESP3D/commits?author=pmjdebruijn" title="Code">💻</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/jschwalbe"><img src="https://avatars.githubusercontent.com/u/8005921?v=4?s=100" width="100px;" alt="jschwalbe"/><br /><sub><b>jschwalbe</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=jschwalbe" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="http://padcom13.blogspot.com"><img src="https://avatars.githubusercontent.com/u/553994?v=4?s=100" width="100px;" alt="Matthias Hryniszak"/><br /><sub><b>Matthias Hryniszak</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=padcom" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/treepleks"><img src="https://avatars.githubusercontent.com/u/16371923?v=4?s=100" width="100px;" alt="T. Reepleks"/><br /><sub><b>T. Reepleks</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=treepleks" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="http://twitter.com/AustinStAubin"><img src="https://avatars.githubusercontent.com/u/969780?v=4?s=100" width="100px;" alt="Austin St. Aubin"/><br /><sub><b>Austin St. Aubin</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=AustinSaintAubin" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="http://patrickelectric.work"><img src="https://avatars.githubusercontent.com/u/1215497?v=4?s=100" width="100px;" alt="Patrick José Pereira"/><br /><sub><b>Patrick José Pereira</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=patrickelectric" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/j0hnlittle"><img src="https://avatars.githubusercontent.com/u/16280939?v=4?s=100" width="100px;" alt="John Little"/><br /><sub><b>John Little</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=j0hnlittle" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/d-a-v"><img src="https://avatars.githubusercontent.com/u/4800356?v=4?s=100" width="100px;" alt="david gauchard"/><br /><sub><b>david gauchard</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=d-a-v" title="Code">💻</a> <a href="#ideas-d-a-v" title="Ideas, Planning, & Feedback">🤔</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://www.mydiy.dev"><img src="https://avatars.githubusercontent.com/u/23615562?v=4?s=100" width="100px;" alt="coliss86"/><br /><sub><b>coliss86</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=coliss86" title="Documentation">📖</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/fape"><img src="https://avatars.githubusercontent.com/u/1052464?v=4?s=100" width="100px;" alt="Farkas Péter"/><br /><sub><b>Farkas Péter</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=fape" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="http://www.panucatt.com"><img src="https://avatars.githubusercontent.com/u/1669825?v=4?s=100" width="100px;" alt="Panucatt"/><br /><sub><b>Panucatt</b></sub></a><br /><a href="#ideas-royco" title="Ideas, Planning, & Feedback">🤔</a> <a href="#promotion-royco" title="Promotion">📣</a> <a href="https://github.com/luc-github/ESP3D/issues?q=author%3Aroyco" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://discord.gg/yNwksQvZmQ"><img src="https://avatars.githubusercontent.com/u/12979070?v=4?s=100" width="100px;" alt="makerbase"/><br /><sub><b>makerbase</b></sub></a><br /><a href="#platform-makerbase-mks" title="Packaging/porting to new platform">📦</a> <a href="#financial-makerbase-mks" title="Financial">💵</a> <a href="https://github.com/luc-github/ESP3D/issues?q=author%3Amakerbase-mks" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/liqijian101"><img src="https://avatars.githubusercontent.com/u/16173343?v=4?s=100" width="100px;" alt="liqijian101"/><br /><sub><b>liqijian101</b></sub></a><br /><a href="#ideas-liqijian101" title="Ideas, Planning, & Feedback">🤔</a> <a href="https://github.com/luc-github/ESP3D/issues?q=author%3Aliqijian101" title="Bug reports">🐛</a> <a href="#platform-liqijian101" title="Packaging/porting to new platform">📦</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/disneysw"><img src="https://avatars.githubusercontent.com/u/10690321?v=4?s=100" width="100px;" alt="disneysw"/><br /><sub><b>disneysw</b></sub></a><br /><a href="#ideas-disneysw" title="Ideas, Planning, & Feedback">🤔</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="http://www.fysetc.com"><img src="https://avatars.githubusercontent.com/u/36067086?v=4?s=100" width="100px;" alt="FYSETC.COM"/><br /><sub><b>FYSETC.COM</b></sub></a><br /><a href="#financial-FYSETC" title="Financial">💵</a> <a href="https://github.com/luc-github/ESP3D/issues?q=author%3AFYSETC" title="Bug reports">🐛</a> <a href="#platform-FYSETC" title="Packaging/porting to new platform">📦</a></td>
+    </tr>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="http://www.bigtree-tech.com"><img src="https://avatars.githubusercontent.com/u/38851044?v=4?s=100" width="100px;" alt="BIGTREETECH"/><br /><sub><b>BIGTREETECH</b></sub></a><br /><a href="#platform-bigtreetech" title="Packaging/porting to new platform">📦</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/dbuezas"><img src="https://avatars.githubusercontent.com/u/777196?v=4?s=100" width="100px;" alt="David Buezas"/><br /><sub><b>David Buezas</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=dbuezas" title="Code">💻</a> <a href="https://github.com/luc-github/ESP3D/issues?q=author%3Adbuezas" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="http://engineer2designer.blogspot.com"><img src="https://avatars.githubusercontent.com/u/25747949?v=4?s=100" width="100px;" alt="E2D"/><br /><sub><b>E2D</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=Engineer2Designer" title="Code">💻</a> <a href="https://github.com/luc-github/ESP3D/issues?q=author%3AEngineer2Designer" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/rondlh"><img src="https://avatars.githubusercontent.com/u/77279634?v=4?s=100" width="100px;" alt="rondlh"/><br /><sub><b>rondlh</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=rondlh" title="Code">💻</a> <a href="https://github.com/luc-github/ESP3D/issues?q=author%3Arondlh" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/Levak"><img src="https://avatars.githubusercontent.com/u/2292040?v=4?s=100" width="100px;" alt="Levak"/><br /><sub><b>Levak</b></sub></a><br /><a href="https://github.com/luc-github/ESP3D/commits?author=Levak" title="Code">💻</a> <a href="https://github.com/luc-github/ESP3D/issues?q=author%3ALevak" title="Bug reports">🐛</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<!-- markdownlint-restore -->
+<!-- prettier-ignore-end -->
+
+<!-- ALL-CONTRIBUTORS-LIST:END -->
