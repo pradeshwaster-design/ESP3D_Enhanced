@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0e17"/>
+      <stop offset="50%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    
+    <linearGradient id="titleGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="50%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="100%" stop-color="#4facfe"/>
+    </linearGradient>
+
+    <linearGradient id="glowGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0284c7" stop-opacity="0.4"/>
+      <stop offset="50%" stop-color="#7c3aed" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Circuit Pattern -->
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.75" stroke-opacity="0.6"/>
+      <circle cx="0" cy="0" r="1.5" fill="#334155"/>
+    </pattern>
+
+    <!-- Filters -->
+    <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="360" fill="url(#bgGrad)"/>
+  <rect width="1200" height="360" fill="url(#grid)" opacity="0.8"/>
+
+  <!-- Glowing background ambient blobs -->
+  <circle cx="200" cy="180" r="160" fill="url(#glowGrad)" filter="url(#neonGlow)"/>
+  <circle cx="1050" cy="120" r="140" fill="#7c3aed" opacity="0.15" filter="url(#neonGlow)"/>
+
+  <!-- Cyberpunk Tech lines -->
+  <path d="M 0,280 L 180,280 L 220,320 L 500,320" fill="none" stroke="#0284c7" stroke-width="2" opacity="0.4"/>
+  <circle cx="500" cy="320" r="4" fill="#38bdf8"/>
+  <path d="M 750,40 L 980,40 L 1020,80 L 1200,80" fill="none" stroke="#a855f7" stroke-width="2" opacity="0.4"/>
+  <circle cx="750" cy="40" r="4" fill="#c084fc"/>
+
+  <!-- Left Hero Icon / Graphic: Stylized ESP32 + 3D Printer + Telegram -->
+  <g transform="translate(100, 75)">
+    <!-- Outer Glow Box -->
+    <rect x="0" y="0" width="200" height="200" rx="36" fill="#0f172a" stroke="#1e293b" stroke-width="2"/>
+    <rect x="4" y="4" width="192" height="192" rx="32" fill="none" stroke="url(#accentGrad)" stroke-width="1.5" opacity="0.7"/>
+
+    <!-- ESP32 Chip Icon Base -->
+    <rect x="50" y="50" width="100" height="100" rx="14" fill="#1e293b" stroke="#38bdf8" stroke-width="2" filter="url(#neonGlow)"/>
+    <text x="100" y="92" font-family="'Segoe UI', Ubuntu, sans-serif" font-weight="900" font-size="20" fill="#38bdf8" text-anchor="middle" letter-spacing="2">ESP32</text>
+    <text x="100" y="112" font-family="'Segoe UI', Ubuntu, sans-serif" font-weight="700" font-size="12" fill="#a855f7" text-anchor="middle" letter-spacing="3">CORE</text>
+
+    <!-- Chip Pins -->
+    <path d="M 50,70 L 34,70 M 50,90 L 34,90 M 50,110 L 34,110 M 50,130 L 34,130" stroke="#38bdf8" stroke-width="3" stroke-linecap="round"/>
+    <path d="M 150,70 L 166,70 M 150,90 L 166,90 M 150,110 L 166,110 M 150,130 L 166,130" stroke="#38bdf8" stroke-width="3" stroke-linecap="round"/>
+    <path d="M 70,50 L 70,34 M 90,50 L 90,34 M 110,50 L 110,34 M 130,50 L 130,34" stroke="#a855f7" stroke-width="3" stroke-linecap="round"/>
+    <path d="M 70,150 L 70,166 M 90,150 L 90,166 M 110,150 L 110,166 M 130,150 L 130,166" stroke="#a855f7" stroke-width="3" stroke-linecap="round"/>
+
+    <!-- Floating Telegram Paper Airplane Badge -->
+    <g transform="translate(130, 130)">
+      <circle cx="28" cy="28" r="30" fill="#229ED9" stroke="#0f172a" stroke-width="4" filter="url(#neonGlow)"/>
+      <path d="M 16,28 L 38,18 L 34,38 L 26,32 L 23,36 L 22,30 Z" fill="#ffffff"/>
+      <path d="M 26,32 L 34,22 L 22,30 Z" fill="#b0d8f0" opacity="0.6"/>
+    </g>
+  </g>
+
+  <!-- Title & Branding -->
+  <g transform="translate(360, 110)">
+    <!-- Subtitle Category Tag -->
+    <rect x="0" y="0" width="220" height="26" rx="6" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <text x="110" y="17" font-family="'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="700" fill="#38bdf8" text-anchor="middle" letter-spacing="2">STANDALONE PRINT SERVER</text>
+
+    <!-- Main Title -->
+    <text x="0" y="72" font-family="'Segoe UI', Montserrat, sans-serif" font-size="54" font-weight="900" fill="url(#titleGrad)" letter-spacing="1">
+      ESP3D <tspan fill="#f8fafc">ENHANCED</tspan>
+    </text>
+
+    <!-- Tagline -->
+    <text x="0" y="108" font-family="'Segoe UI', Roboto, sans-serif" font-size="19" font-weight="400" fill="#94a3b8">
+      Autonomous Wireless 3D Print Server &amp; 2-Way Telegram Bot for Marlin
+    </text>
+
+    <!-- Feature Pills / Badges -->
+    <g transform="translate(0, 140)">
+      <!-- Pill 1: 20MB Upload -->
+      <rect x="0" y="0" width="135" height="32" rx="16" fill="#0f172a" stroke="#0284c7" stroke-width="1.5"/>
+      <text x="67" y="20" font-family="'Segoe UI', sans-serif" font-size="12" font-weight="600" fill="#38bdf8" text-anchor="middle">⚡ 20MB SD Upload</text>
+
+      <!-- Pill 2: 2-Way Bot -->
+      <rect x="145" y="0" width="130" height="32" rx="16" fill="#0f172a" stroke="#8b5cf6" stroke-width="1.5"/>
+      <text x="210" y="20" font-family="'Segoe UI', sans-serif" font-size="12" font-weight="600" fill="#a78bfa" text-anchor="middle">🤖 2-Way Telegram</text>
+
+      <!-- Pill 3: Live Tuning -->
+      <rect x="285" y="0" width="120" height="32" rx="16" fill="#0f172a" stroke="#10b981" stroke-width="1.5"/>
+      <text x="345" y="20" font-family="'Segoe UI', sans-serif" font-size="12" font-weight="600" fill="#34d399" text-anchor="middle">🎛️ Live Tuning</text>
+
+      <!-- Pill 4: Marlin Auto-Break -->
+      <rect x="415" y="0" width="145" height="32" rx="16" fill="#0f172a" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="487" y="20" font-family="'Segoe UI', sans-serif" font-size="12" font-weight="600" fill="#fbbf24" text-anchor="middle">🛡️ Pause Auto-Break</text>
+
+      <!-- Pill 5: Babystepping -->
+      <rect x="570" y="0" width="130" height="32" rx="16" fill="#0f172a" stroke="#ec4899" stroke-width="1.5"/>
+      <text x="635" y="20" font-family="'Segoe UI', sans-serif" font-size="12" font-weight="600" fill="#f472b6" text-anchor="middle">📏 Z-Babystep</text>
+    </g>
+  </g>
+</svg>
