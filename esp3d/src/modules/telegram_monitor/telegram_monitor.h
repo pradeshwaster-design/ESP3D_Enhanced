@@ -1,14 +1,12 @@
 /*
   telegram_monitor.h - 2-Way Interactive Telegram Monitor & Remote Control
-
-  Features:
-  - 2-Way Telegram Bot: /status, /pause, /resume, /stop, /emergency, /temp, /cooldown, /help
-  - Position & Movement: /pos (tool coordinates), /home (home axes)
-  - Screen Info: /display (LCD status, speeds, message)
-  - SD File Management: /files (list files), /print <num|name> (choose and print)
-  - 1-minute updates while printing (file name, elapsed time, estimated time left, progress, Z, temps)
-  - 5-minute idle status updates
-  - Instant print start & finish alerts
+  
+  All bugs fixed:
+  - Skip stale Telegram messages on boot (no double reboot)
+  - Pause state tracking (no false "Print Finished" on pause)
+  - Correct Marlin commands (M108 for resume, M108+M524 for stop)
+  - Safe deferred network calls (no crashes from serial ISR)
+  - Proper LCD message parsing
 */
 
 #ifndef _TELEGRAM_MONITOR_H
@@ -17,42 +15,42 @@
 #include <Arduino.h>
 
 // ── Configuration ────────────────────────────────────────
-#define TELEGRAM_PRINT_INTERVAL  60000   // 1 minute while printing (60,000 ms)
-#define TELEGRAM_IDLE_INTERVAL   300000  // 5 minutes when idle (300,000 ms)
-#define TELEGRAM_POLL_INTERVAL   4000    // Check incoming Telegram commands every 4s
-#define MAX_SD_FILES             25      // Maximum number of SD files to cache
+#define TELEGRAM_PRINT_INTERVAL  60000   // 1 minute while printing
+#define TELEGRAM_IDLE_INTERVAL   300000  // 5 minutes when idle
+#define TELEGRAM_POLL_INTERVAL   4000    // Check Telegram commands every 4s
+#define MAX_SD_FILES             25
 
 class TelegramMonitor {
  public:
   TelegramMonitor();
   void begin();
-  void handle();  // Call from main loop
-  
-  // Called by serial service when data arrives from Marlin
+  void handle();
   void parseSerialData(const uint8_t* data, size_t size);
 
  private:
   bool _started;
+  bool _skipFirstPoll;          // Skip processing commands on first poll after boot
   uint32_t _lastPrintUpdateTime;
   uint32_t _lastIdleUpdateTime;
   uint32_t _lastPollTime;
   uint32_t _lastTelegramPollTime;
   uint32_t _filesRequestTime;
   int64_t _lastUpdateId;
-  
-  // Decoupled pending command queue
+
+  // Queued command from Telegram (processed in handle(), not in poll)
   String _pendingCommand;
   String _pendingFromId;
 
-  // Printer state parsed from serial stream
+  // Printer state
   bool _isPrinting;
   bool _wasPrinting;
+  bool _isPaused;               // True when M25 pause is active
   String _fileName;
   float _hotendActual;
   float _hotendTarget;
   float _bedActual;
   float _bedTarget;
-  float _progress;       // 0-100%
+  float _progress;
   uint32_t _bytesDone;
   uint32_t _bytesTotal;
   float _posX;
@@ -61,9 +59,8 @@ class TelegramMonitor {
   float _posE;
   int _feedrate;
   int _flowrate;
-  String _lcdMessage;
   String _printTime;
-  
+
   // SD file listing
   String _sdFiles[MAX_SD_FILES];
   uint8_t _sdFileCount;
@@ -77,8 +74,7 @@ class TelegramMonitor {
   void sendPrintStarted();
   void sendPrintFinished();
   void sendSDFileListReply();
-  
-  // 2-Way Telegram methods
+
   void pollTelegramUpdates();
   void processTelegramCommand(String cmd, const String& fromId);
   void sendTelegramReply(const String& text);
@@ -86,4 +82,4 @@ class TelegramMonitor {
 
 extern TelegramMonitor telegram_monitor;
 
-#endif  // _TELEGRAM_MONITOR_H
+#endif
