@@ -65,6 +65,10 @@ class TelegramMonitor {
   String _uploadFileId;
   String _uploadFileName;
   String _uploadFilePath;
+  String _uploadStreamHost;
+  uint16_t _uploadStreamPort;
+  String _uploadStreamPath;
+  uint8_t _uploadRedirectCount;
   String _uploadSdName;
   uint32_t _uploadFileSize;
   uint32_t _uploadBytesSent;

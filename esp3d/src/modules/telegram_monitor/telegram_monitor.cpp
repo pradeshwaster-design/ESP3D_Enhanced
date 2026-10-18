@@ -51,6 +51,10 @@ TelegramMonitor::TelegramMonitor() {
   _uploadFileId = "";
   _uploadFileName = "";
   _uploadFilePath = "";
+  _uploadStreamHost = "";
+  _uploadStreamPort = 443;
+  _uploadStreamPath = "";
+  _uploadRedirectCount = 0;
   _uploadSdName = "";
   _uploadFileSize = 0;
   _uploadBytesSent = 0;
@@ -123,6 +127,10 @@ void TelegramMonitor::begin() {
   _uploadFileId = "";
   _uploadFileName = "";
   _uploadFilePath = "";
+  _uploadStreamHost = "";
+  _uploadStreamPort = 443;
+  _uploadStreamPath = "";
+  _uploadRedirectCount = 0;
   _uploadSdName = "";
   _uploadFileSize = 0;
   _uploadBytesSent = 0;
@@ -712,6 +720,10 @@ void TelegramMonitor::startFileUpload(const String& fileId, const String& fileNa
   _uploadRequestedResend = 0;
   _uploadLastResendLine = 0;
   _uploadResendCount = 0;
+  _uploadStreamHost = "";
+  _uploadStreamPort = 443;
+  _uploadStreamPath = "";
+  _uploadRedirectCount = 0;
   _isUploadSerialCaller = false;
   _uploadState = UPLOAD_RESOLVE_URL;
 
@@ -736,8 +748,8 @@ void TelegramMonitor::startFileUpload(const String& fileId, const String& fileNa
 void TelegramMonitor::handleTelegramFileUpload() {
   uint32_t now = millis();
 
-  // Inactivity timeout guard (15 seconds without receiving data)
-  if (now - _uploadLastActivity > 15000) {
+  // Inactivity timeout guard (35 seconds without receiving data)
+  if (now - _uploadLastActivity > 35000) {
     sendUploadSerial("\nM29\n");
     _uploadClient.stop();
     _uploadState = UPLOAD_IDLE;
@@ -749,7 +761,7 @@ void TelegramMonitor::handleTelegramFileUpload() {
   if (_uploadState == UPLOAD_RESOLVE_URL) {
     const String& token = notificationsservice.getToken1();
     _uploadClient.setInsecure();
-    _uploadClient.setTimeout(5000); // 5000 ms
+    _uploadClient.setTimeout(8000); // 8000 ms
     if (!_uploadClient.connect("api.telegram.org", 443)) {
       _uploadState = UPLOAD_IDLE;
       sendTelegramReply("❌ Failed to connect to Telegram server for download!");
@@ -760,7 +772,7 @@ void TelegramMonitor::handleTelegramFileUpload() {
     _uploadClient.print(req);
 
     uint32_t t0 = millis();
-    while (!_uploadClient.available() && (millis() - t0 < 4000)) delay(10);
+    while (!_uploadClient.available() && (millis() - t0 < 6000)) delay(10);
     if (!_uploadClient.available()) {
       _uploadClient.stop();
       _uploadState = UPLOAD_IDLE;
@@ -787,44 +799,58 @@ void TelegramMonitor::handleTelegramFileUpload() {
 
     if (filePath.length() == 0) {
       _uploadState = UPLOAD_IDLE;
-      sendTelegramReply("❌ Could not resolve Telegram file path!");
+      String errDesc = "";
+      int descPos = resp.indexOf("\"description\":\"");
+      if (descPos >= 0) {
+        int s = descPos + 15;
+        int e = resp.indexOf('"', s);
+        if (e > s) errDesc = resp.substring(s, e);
+      }
+      if (errDesc.length() > 0) {
+        sendTelegramReply("❌ Telegram API Error: " + errDesc);
+      } else {
+        sendTelegramReply("❌ Could not resolve Telegram file path!");
+      }
       return;
     }
 
     _uploadFilePath = filePath;
+    _uploadStreamHost = "api.telegram.org";
+    _uploadStreamPort = 443;
+    _uploadStreamPath = "/file/bot" + token + "/" + filePath;
+    _uploadRedirectCount = 0;
     _uploadState = UPLOAD_CONNECT_STREAM;
     _uploadLastActivity = millis();
     return;
   }
 
-  // ── STATE 2: Connect to File Stream and Send M28 to Marlin ──
+  // ── STATE 2: Connect to File Stream, Follow Redirects, and Send M28 to Marlin ──
   if (_uploadState == UPLOAD_CONNECT_STREAM) {
-    const String& token = notificationsservice.getToken1();
     _uploadClient.setInsecure();
-    _uploadClient.setTimeout(5000); // 5000 ms
-    if (!_uploadClient.connect("api.telegram.org", 443)) {
+    _uploadClient.setTimeout(8000); // 8000 ms
+    if (!_uploadClient.connect(_uploadStreamHost.c_str(), _uploadStreamPort)) {
       _uploadState = UPLOAD_IDLE;
-      sendTelegramReply("❌ Failed to connect to Telegram file storage!");
+      sendTelegramReply("❌ Failed to connect to storage: " + _uploadStreamHost);
       return;
     }
 
-    String req = "GET /file/bot" + token + "/" + _uploadFilePath + " HTTP/1.1\r\nHost: api.telegram.org\r\nConnection: close\r\n\r\n";
+    String req = "GET " + _uploadStreamPath + " HTTP/1.1\r\nHost: " + _uploadStreamHost + "\r\nConnection: close\r\n\r\n";
     _uploadClient.print(req);
 
     uint32_t t0 = millis();
-    while (!_uploadClient.available() && (millis() - t0 < 5000)) delay(10);
+    while (!_uploadClient.available() && (millis() - t0 < 8000)) delay(10);
     if (!_uploadClient.available()) {
       _uploadClient.stop();
       _uploadState = UPLOAD_IDLE;
-      sendTelegramReply("❌ Timeout opening file stream!");
+      sendTelegramReply("❌ Timeout opening file stream from " + _uploadStreamHost);
       return;
     }
 
-    // Skip HTTP response headers and extract Content-Length
+    // Read HTTP response headers
     bool inBody = false;
     String headerBuf = "";
     t0 = millis();
-    while ((_uploadClient.connected() || _uploadClient.available()) && (millis() - t0 < 4000)) {
+    while ((_uploadClient.connected() || _uploadClient.available()) && (millis() - t0 < 8000)) {
       char c = _uploadClient.read();
       if (c == (char)-1) continue;
       headerBuf += c;
@@ -837,7 +863,79 @@ void TelegramMonitor::handleTelegramFileUpload() {
     if (!inBody) {
       _uploadClient.stop();
       _uploadState = UPLOAD_IDLE;
-      sendTelegramReply("❌ Invalid HTTP response from Telegram!");
+      sendTelegramReply("❌ Invalid HTTP response from " + _uploadStreamHost);
+      return;
+    }
+
+    // Extract HTTP status code
+    int httpCode = 0;
+    int httpPos = headerBuf.indexOf("HTTP/1.");
+    if (httpPos >= 0) {
+      httpCode = headerBuf.substring(httpPos + 9, httpPos + 12).toInt();
+    }
+
+    // Handle HTTP Redirects (301, 302, 303, 307, 308)
+    if (httpCode == 301 || httpCode == 302 || httpCode == 303 || httpCode == 307 || httpCode == 308) {
+      _uploadRedirectCount++;
+      if (_uploadRedirectCount > 5) {
+        _uploadClient.stop();
+        _uploadState = UPLOAD_IDLE;
+        sendTelegramReply("❌ Too many redirects from Telegram storage!");
+        return;
+      }
+      String loc = "";
+      int locPos = headerBuf.indexOf("Location:");
+      if (locPos < 0) locPos = headerBuf.indexOf("location:");
+      if (locPos >= 0) {
+        int s = locPos + 9;
+        while (s < (int)headerBuf.length() && headerBuf.charAt(s) == ' ') s++;
+        int e = headerBuf.indexOf("\r\n", s);
+        if (e > s) loc = headerBuf.substring(s, e);
+      }
+      loc.trim();
+      _uploadClient.stop();
+
+      if (loc.length() == 0) {
+        _uploadState = UPLOAD_IDLE;
+        sendTelegramReply("❌ Redirect without Location header from storage!");
+        return;
+      }
+
+      // Parse target redirect URL (absolute or relative)
+      if (loc.startsWith("https://")) {
+        int slash = loc.indexOf('/', 8);
+        if (slash >= 0) {
+          _uploadStreamHost = loc.substring(8, slash);
+          _uploadStreamPath = loc.substring(slash);
+        } else {
+          _uploadStreamHost = loc.substring(8);
+          _uploadStreamPath = "/";
+        }
+        _uploadStreamPort = 443;
+      } else if (loc.startsWith("http://")) {
+        int slash = loc.indexOf('/', 7);
+        if (slash >= 0) {
+          _uploadStreamHost = loc.substring(7, slash);
+          _uploadStreamPath = loc.substring(slash);
+        } else {
+          _uploadStreamHost = loc.substring(7);
+          _uploadStreamPath = "/";
+        }
+        _uploadStreamPort = 80;
+      } else {
+        _uploadStreamPath = loc;
+      }
+
+      _uploadLastActivity = millis();
+      // Remain in UPLOAD_CONNECT_STREAM to connect to the new CDN host/path!
+      return;
+    }
+
+    // If HTTP error (not 200)
+    if (httpCode != 200 && httpCode != 0) {
+      _uploadClient.stop();
+      _uploadState = UPLOAD_IDLE;
+      sendTelegramReply("❌ Telegram storage error: HTTP " + String(httpCode));
       return;
     }
 
