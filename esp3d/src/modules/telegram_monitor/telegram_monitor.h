@@ -175,6 +175,9 @@ class TelegramMonitor {
   String getPausedMarkup();
   String getIdleMarkup();
   String getReplyKeyboardMarkup();
+  String getControlMarkup();
+  String getTuningMarkup();
+  String getPreheatMarkup();
 };
 
 extern TelegramMonitor telegram_monitor;

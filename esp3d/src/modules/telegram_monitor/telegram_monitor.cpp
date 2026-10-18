@@ -563,19 +563,61 @@ void TelegramMonitor::parseSingleLine(const char* line) {
 
 // ── Outgoing messages & Telegram Keyboards ───────────────
 String TelegramMonitor::getPrintingMarkup() {
-  return "{\"inline_keyboard\":[[{\"text\":\"⏸️ Pause\",\"callback_data\":\"/pause\"},{\"text\":\"⏹️ Stop\",\"callback_data\":\"/stop\"}],[{\"text\":\"📊 Status\",\"callback_data\":\"/status\"},{\"text\":\"📁 Files\",\"callback_data\":\"/files\"}]]}";
+  return "{\"inline_keyboard\":["
+         "[{\"text\":\"⏸️ Pause\",\"callback_data\":\"/pause\"},{\"text\":\"⏹️ Stop\",\"callback_data\":\"/stop\"}],"
+         "[{\"text\":\"🎛️ Tune\",\"callback_data\":\"/tuning_menu\"},{\"text\":\"📊 Refresh\",\"callback_data\":\"/status\"}],"
+         "[{\"text\":\"📁 Files\",\"callback_data\":\"/files\"},{\"text\":\"ℹ️ Info\",\"callback_data\":\"/info\"}]"
+         "]}";
 }
 
 String TelegramMonitor::getPausedMarkup() {
-  return "{\"inline_keyboard\":[[{\"text\":\"▶️ Resume\",\"callback_data\":\"/resume\"},{\"text\":\"⏹️ Stop\",\"callback_data\":\"/stop\"}],[{\"text\":\"📊 Status\",\"callback_data\":\"/status\"},{\"text\":\"📁 Files\",\"callback_data\":\"/files\"}]]}";
+  return "{\"inline_keyboard\":["
+         "[{\"text\":\"▶️ Resume\",\"callback_data\":\"/resume\"},{\"text\":\"⏹️ Stop\",\"callback_data\":\"/stop\"}],"
+         "[{\"text\":\"🧵 Load\",\"callback_data\":\"/load\"},{\"text\":\"🧵 Unload\",\"callback_data\":\"/unload\"}],"
+         "[{\"text\":\"📊 Status\",\"callback_data\":\"/status\"},{\"text\":\"📁 Files\",\"callback_data\":\"/files\"}]"
+         "]}";
 }
 
 String TelegramMonitor::getIdleMarkup() {
-  return "{\"inline_keyboard\":[[{\"text\":\"📊 Status\",\"callback_data\":\"/status\"},{\"text\":\"📁 SD Files\",\"callback_data\":\"/files\"}],[{\"text\":\"ℹ️ Info\",\"callback_data\":\"/info\"},{\"text\":\"❓ Help\",\"callback_data\":\"/help\"}]]}";
+  return "{\"inline_keyboard\":["
+         "[{\"text\":\"📁 SD Files\",\"callback_data\":\"/files\"},{\"text\":\"📊 Status\",\"callback_data\":\"/status\"}],"
+         "[{\"text\":\"🔥 Preheat\",\"callback_data\":\"/preheat_menu\"},{\"text\":\"🧭 Control\",\"callback_data\":\"/control_menu\"}],"
+         "[{\"text\":\"ℹ️ Machine Info\",\"callback_data\":\"/info\"},{\"text\":\"❓ Help\",\"callback_data\":\"/help\"}]"
+         "]}";
+}
+
+String TelegramMonitor::getControlMarkup() {
+  return "{\"inline_keyboard\":["
+         "[{\"text\":\"🏠 Home All\",\"callback_data\":\"/home_all\"},{\"text\":\"❄️ Cooldown\",\"callback_data\":\"/cooldown\"}],"
+         "[{\"text\":\"🧵 Load (60mm)\",\"callback_data\":\"/load\"},{\"text\":\"🧵 Unload (430mm)\",\"callback_data\":\"/unload\"}],"
+         "[{\"text\":\"📍 Position\",\"callback_data\":\"/pos\"},{\"text\":\"📺 LCD Screen\",\"callback_data\":\"/display\"}],"
+         "[{\"text\":\"⬅️ Back to Menu\",\"callback_data\":\"/status\"}]"
+         "]}";
+}
+
+String TelegramMonitor::getTuningMarkup() {
+  return "{\"inline_keyboard\":["
+         "[{\"text\":\"🐇 Speed 120%\",\"callback_data\":\"/speed 120\"},{\"text\":\"🐢 Speed 80%\",\"callback_data\":\"/speed 80\"}],"
+         "[{\"text\":\"💨 Fan 100%\",\"callback_data\":\"/fan 100\"},{\"text\":\"🔇 Fan Off\",\"callback_data\":\"/fan 0\"}],"
+         "[{\"text\":\"⬆️ Z+0.05\",\"callback_data\":\"/zoffset 0.05\"},{\"text\":\"⬇️ Z-0.05\",\"callback_data\":\"/zoffset -0.05\"}],"
+         "[{\"text\":\"⬅️ Back to Status\",\"callback_data\":\"/status\"}]"
+         "]}";
+}
+
+String TelegramMonitor::getPreheatMarkup() {
+  return "{\"inline_keyboard\":["
+         "[{\"text\":\"🔥 PLA (200/60C)\",\"callback_data\":\"/preheat_pla\"},{\"text\":\"🔥 PETG (240/75C)\",\"callback_data\":\"/preheat_petg\"}],"
+         "[{\"text\":\"🔥 Nozzle 200C\",\"callback_data\":\"/hotend 200\"},{\"text\":\"🛏️ Bed 60C\",\"callback_data\":\"/bed 60\"}],"
+         "[{\"text\":\"❄️ All Off (Cooldown)\",\"callback_data\":\"/cooldown\"},{\"text\":\"⬅️ Back\",\"callback_data\":\"/status\"}]"
+         "]}";
 }
 
 String TelegramMonitor::getReplyKeyboardMarkup() {
-  return "{\"keyboard\":[[{\"text\":\"/status\"},{\"text\":\"/files\"}],[{\"text\":\"/pause\"},{\"text\":\"/resume\"},{\"text\":\"/stop\"}],[{\"text\":\"/info\"},{\"text\":\"/help\"}]],\"resize_keyboard\":true}";
+  return "{\"keyboard\":["
+         "[{\"text\":\"📊 Status\"},{\"text\":\"📁 SD Files\"}],"
+         "[{\"text\":\"⏸️ Pause\"},{\"text\":\"▶️ Resume\"},{\"text\":\"⏹️ Stop\"}],"
+         "[{\"text\":\"🔥 Preheat\"},{\"text\":\"🧭 Control\"},{\"text\":\"ℹ️ Info\"}]"
+         "],\"resize_keyboard\":true}";
 }
 
 void TelegramMonitor::answerCallbackQuery(const String& queryId) {
@@ -670,33 +712,33 @@ void TelegramMonitor::sendStatusUpdate() {
     uint32_t rem = (uint32_t)((float)elapsed / (_progress / 100.0) - elapsed);
     timeLeft = formatTime(rem);
   }
-  String msg = "Print Status\n";
-  if (_fileName.length() > 0) msg += "File: " + _fileName + "\n";
-  msg += buildProgressBar(_progress) + " " + String(_progress, 1) + "%\n";
+  String msg = "📊 *Printer Status*\n";
+  if (_fileName.length() > 0) msg += "📁 File: " + _fileName + "\n";
+  msg += buildProgressBar(_progress) + " " + String(_progress, 1) + "%\n\n";
 
   // Layer progress
   if (_currentLayer > 0 && _totalLayers > 0) {
-    msg += "Layer: " + String(_currentLayer) + " / " + String(_totalLayers) + "\n";
+    msg += "🧱 Layer: " + String(_currentLayer) + " / " + String(_totalLayers) + "\n";
   } else if (_currentLayer > 0) {
-    msg += "Layer: " + String(_currentLayer) + "\n";
+    msg += "🧱 Layer: " + String(_currentLayer) + "\n";
   }
 
   if (_isPaused) {
     if (_marlinWaitingForUser && _marlinPrompt.length() > 0) {
-      msg += "PAUSED - LCD: " + _marlinPrompt + "\n";
+      msg += "⏸️ PAUSED - LCD: " + _marlinPrompt + "\n";
     } else if (_marlinWaitingForUser) {
-      msg += "PAUSED (waiting for user)\n";
+      msg += "⏸️ PAUSED (Waiting for user)\n";
     } else {
-      msg += "PAUSED (processing...)\n";
+      msg += "⏸️ PAUSED\n";
     }
   }
-  if (_printTime.length() > 0) msg += "Elapsed: " + _printTime + "\n";
-  msg += "Time Left: ~" + timeLeft + "\n";
-  msg += "Hotend: " + String(_hotendActual, 0) + "/" + String(_hotendTarget, 0) + "C\n";
-  msg += "Bed: " + String(_bedActual, 0) + "/" + String(_bedTarget, 0) + "C\n";
-  msg += "Z: " + String(_zHeight, 1) + "mm\n";
-  msg += "Speed: " + String(_feedrate) + "% | Flow: " + String(_flowrate) + "%\n";
-  msg += "Fan: " + String(_fanPct) + "%";
+  if (_printTime.length() > 0) msg += "⏱️ Elapsed: " + _printTime + "\n";
+  msg += "⏳ Time Left: ~" + timeLeft + "\n\n";
+  msg += "🔥 Hotend: " + String(_hotendActual, 1) + " / " + String(_hotendTarget, 0) + "°C\n";
+  msg += "🛏️ Bed: " + String(_bedActual, 1) + " / " + String(_bedTarget, 0) + "°C\n";
+  msg += "📏 Z Height: " + String(_zHeight, 2) + " mm\n";
+  msg += "⚡ Speed: " + String(_feedrate) + "% | Flow: " + String(_flowrate) + "%\n";
+  msg += "💨 Fan: " + String(_fanPct) + "%";
   sendTelegramMessage(msg, _isPaused ? getPausedMarkup() : getPrintingMarkup());
 }
 
@@ -708,43 +750,58 @@ void TelegramMonitor::sendIdleStatus() {
     return;
   }
 
-  String msg = "Printer Status: Idle\n";
-  msg += "Hotend: " + String(_hotendActual, 0) + "/" + String(_hotendTarget, 0) + "C\n";
-  msg += "Bed: " + String(_bedActual, 0) + "/" + String(_bedTarget, 0) + "C\n";
-  msg += "Fan: " + String(_fanPct) + "%";
+  String msg = "🖨️ *Printer Status: IDLE*\n\n";
+  msg += "🔥 Hotend: " + String(_hotendActual, 1) + " / " + String(_hotendTarget, 0) + "°C\n";
+  msg += "🛏️ Bed: " + String(_bedActual, 1) + " / " + String(_bedTarget, 0) + "°C\n";
+  msg += "💨 Fan: " + String(_fanPct) + "%\n";
+  msg += "📍 Position: X:" + String(_posX, 1) + " Y:" + String(_posY, 1) + " Z:" + String(_zHeight, 2) + " mm\n\n";
+  msg += "💡 Send a .gcode file to upload or tap buttons below to start.";
   sendTelegramMessage(msg, getIdleMarkup());
 }
 
 void TelegramMonitor::sendPrintStarted() {
   if (!notificationsservice.started()) return;
-  String msg = "🚀 Print Started!\n";
-  if (_fileName.length() > 0) msg += "File: " + _fileName + "\n";
-  msg += "Hotend Target: " + String(_hotendTarget, 0) + "°C | Bed Target: " + String(_bedTarget, 0) + "°C";
+  String msg = "🚀 *Print Started!*\n\n";
+  if (_fileName.length() > 0) msg += "📁 File: " + _fileName + "\n";
+  msg += "🔥 Hotend Target: " + String(_hotendTarget, 0) + "°C\n";
+  msg += "🛏️ Bed Target: " + String(_bedTarget, 0) + "°C\n\n";
+  msg += "💡 Monitoring active. You will receive milestone updates at Layer 1, 25%, 50%, and 75%.";
   sendTelegramMessage(msg, getPrintingMarkup());
 }
 
 void TelegramMonitor::sendPrintFinished() {
   if (!notificationsservice.started()) return;
-  String msg = "🏁 Print Finished!\n";
-  if (_fileName.length() > 0) msg += "File: " + _fileName + "\n";
-  if (_printTime.length() > 0) msg += "Total Time: " + _printTime + "\n";
-  msg += "Hotend: " + String(_hotendActual, 0) + "°C | Bed: " + String(_bedActual, 0) + "°C\n";
-  msg += "Cooldown in progress. You will be alerted when bed is safe to remove.";
+  String msg = "🏁 *Print Finished Successfully!*\n\n";
+  if (_fileName.length() > 0) msg += "📁 File: " + _fileName + "\n";
+  if (_printTime.length() > 0) msg += "⏱️ Total Time: " + _printTime + "\n";
+  msg += "🔥 Hotend: " + String(_hotendActual, 1) + "°C\n";
+  msg += "🛏️ Bed: " + String(_bedActual, 1) + "°C\n\n";
+  msg += "❄️ Cooldown in progress. The bot will alert you when the bed is cool enough to safely remove the part.";
   sendTelegramMessage(msg, getIdleMarkup());
 }
 
 void TelegramMonitor::sendSDFileListReply() {
   if (_sdFileCount == 0) {
-    sendTelegramReply("SD Card: No files found or card not inserted.");
+    sendTelegramReply("📁 SD Card: No files found or card not inserted.");
     return;
   }
-  String msg = "📁 SD Card Files (" + String(_sdFileCount) + "):\n\n";
+  String msg = "📁 *SD Card Files (" + String(_sdFileCount) + ")*\n\n";
+  String markup = "{\"inline_keyboard\":[";
   for (uint8_t i = 0; i < _sdFileCount; i++) {
-    msg += String(i + 1) + ". " + _sdFiles[i] + "\n";
-    msg += "   ▶️ /print_" + String(i + 1) + "  🗑️ /del_" + String(i + 1) + "\n\n";
+    msg += String(i + 1) + ". `" + _sdFiles[i] + "`\n";
+    msg += "   ▶️ /print_" + String(i + 1) + "   🗑️ /del_" + String(i + 1) + "\n\n";
+    if (i < 8) { // Create inline button pairs for the first up to 8 files
+      if (i > 0) markup += ",";
+      markup += "[{\"text\":\"▶️ Print #" + String(i + 1) + "\",\"callback_data\":\"/print_" + String(i + 1) + "\"},";
+      markup += "{\"text\":\"🗑️ Del #" + String(i + 1) + "\",\"callback_data\":\"/del_" + String(i + 1) + "\"}]";
+    }
   }
-  msg += "Tap /print_<n> to print, or /del_<n> to delete!";
-  sendTelegramMessage(msg, getIdleMarkup());
+  if (_sdFileCount > 0) markup += ",";
+  markup += "[{\"text\":\"🔄 Refresh List\",\"callback_data\":\"/files\"},{\"text\":\"⬅️ Main Menu\",\"callback_data\":\"/status\"}]";
+  markup += "]}";
+
+  msg += "👉 Tap an inline button or click /print_<n> / /del_<n>!";
+  sendTelegramMessage(msg, markup);
 }
 
 void TelegramMonitor::sendPrinterInfoReply() {
@@ -1425,28 +1482,60 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
   lc.toLowerCase();
 
   // Button & emoji aliases
-  if (lc == "📊 status" || lc == "status") lc = "/status";
-  else if (lc == "📁 files" || lc == "files" || lc == "📁 sd files" || lc == "/sd") lc = "/files";
+  if (lc == "📊 status" || lc == "status" || lc == "📊 refresh") lc = "/status";
+  else if (lc == "📁 files" || lc == "files" || lc == "📁 sd files" || lc == "/sd" || lc == "🔄 refresh list") lc = "/files";
   else if (lc == "⏸️ pause" || lc == "pause") lc = "/pause";
   else if (lc == "▶️ resume" || lc == "resume") lc = "/resume";
   else if (lc == "⏹️ stop" || lc == "stop") lc = "/stop";
-  else if (lc == "ℹ️ info" || lc == "info") lc = "/info";
-  else if (lc == "❓ help" || lc == "help") lc = "/help";
+  else if (lc == "ℹ️ info" || lc == "info" || lc == "ℹ️ machine info") lc = "/info";
+  else if (lc == "❓ help" || lc == "help" || lc == "❓ bot help") lc = "/help";
+  else if (lc == "🔥 preheat" || lc == "preheat") lc = "/preheat_menu";
+  else if (lc == "🧭 control" || lc == "control") lc = "/control_menu";
+  else if (lc == "🎛️ tune" || lc == "tune") lc = "/tuning_menu";
+  else if (lc == "⬅️ back to menu" || lc == "⬅️ back" || lc == "⬅️ back to status" || lc == "⬅️ main menu") lc = "/status";
+
+  // ── Submenu Handlers ──
+  if (lc == "/preheat_menu") {
+    String m = "🔥 *Thermal & Heating Control*\n\n"
+               "Current: Hotend " + String(_hotendActual, 1) + "°C | Bed " + String(_bedActual, 1) + "°C\n"
+               "Select a target preset below:";
+    sendTelegramMessage(m, getPreheatMarkup());
+    return;
+  }
+  else if (lc == "/control_menu") {
+    String m = "🧭 *Printer Motion & Toolhead Control*\n\n"
+               "📍 Position: X:" + String(_posX, 2) + " Y:" + String(_posY, 2) + " Z:" + String(_zHeight, 2) + "\n"
+               "Choose an action below:";
+    sendTelegramMessage(m, getControlMarkup());
+    return;
+  }
+  else if (lc == "/tuning_menu") {
+    String m = "🎛️ *Live Print Tuning*\n\n"
+               "⚡ Speed: " + String(_feedrate) + "% | Flow: " + String(_flowrate) + "% | Fan: " + String(_fanPct) + "%\n"
+               "Adjust parameters on-the-fly:";
+    sendTelegramMessage(m, getTuningMarkup());
+    return;
+  }
 
   // ── Start / Welcome Command ──
   if (lc == "/start") {
-    String welcome = "👋 Welcome to ESP3D Enhanced Telegram Bot!\n\n"
-                     "Your 3D printer remote controller is active.\n"
-                     "Tap any button below or send a command to get started.\n\n"
-                     "📁 Send any .gcode file to upload to SD card.\n"
-                     "⚡ Send any .bin file to flash firmware wirelessly (OTA).";
+    String welcome = "👋 *Welcome to ESP3D Enhanced Remote Controller!*\n\n"
+                     "Your 3D printer tele-control hub is active and online.\n\n"
+                     "📁 *Upload & Print:* Drag and drop any `.gcode` file to upload directly to SD.\n"
+                     "⚡ *OTA Firmware Update:* Send any `.bin` file to flash ESP3D wirelessly.\n"
+                     "🎛️ *One-Tap Controls:* Use the keyboard buttons below to control the printer.";
     sendTelegramMessage(welcome, getReplyKeyboardMarkup());
     return;
   }
 
   // ── OTA Help / Instructions ──
   if (lc == "/ota" || lc == "/update") {
-    sendTelegramReply("⚡ Over-The-Air (OTA) Firmware Flashing:\n\nSimply send or drag-and-drop your compiled .bin file (e.g. firmware.bin) into this chat!\n\nThe bot will automatically receive, verify, and flash the ESP32 OTA partition wirelessly.");
+    sendTelegramReply("⚡ *Over-The-Air (OTA) Firmware Flashing*\n\n"
+                      "To update ESP3D firmware wirelessly:\n"
+                      "1. Export your compiled binary (`firmware.bin`).\n"
+                      "2. Simply drag & drop or attach the `.bin` file into this chat.\n"
+                      "3. The bot will automatically verify and flash the partition in ~10 seconds.\n\n"
+                      "🛡️ Dual-partition fail-safe protection ensures zero risk of bricking.");
     return;
   }
 
