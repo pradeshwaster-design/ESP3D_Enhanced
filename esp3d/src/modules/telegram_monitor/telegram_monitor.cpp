@@ -254,6 +254,16 @@ void TelegramMonitor::parseSingleLine(const char* line) {
     }
   }
 
+  // --- Marlin Resend / Line number desync auto-recovery ---
+  if (_uploadState == UPLOAD_STREAMING) {
+    if (d.indexOf("Resend:") >= 0 || d.indexOf("Line Number is not Last Line Number+1") >= 0) {
+      String sync = "M110 N" + String(_uploadLineNum) + "\n";
+      esp3d_serial_service.writeBytes((const uint8_t*)sync.c_str(), sync.length());
+      _uploadInFlight = 0;
+      _uploadLastOkTime = millis();
+    }
+  }
+
   // --- M115 Firmware Info parsing ---
   int fnPos = d.indexOf("FIRMWARE_NAME:");
   if (fnPos >= 0) {
@@ -1535,8 +1545,8 @@ void TelegramMonitor::pollTelegramUpdates() {
           fnLower.toLowerCase();
           if (!fnLower.endsWith(".gcode") && !fnLower.endsWith(".gco") && !fnLower.endsWith(".g")) {
             sendTelegramReply("❌ Invalid file format!\nPlease send a .gcode file to save to the SD card.");
-          } else if (fsize > 5000000) {
-            sendTelegramReply("⚠️ File too large (" + String(fsize / 1024) + " KB)!\nFor Serial M28 upload, files must be under 5 MB.");
+          } else if (fsize > 20000000) {
+            sendTelegramReply("⚠️ File too large (" + String(fsize / 1024) + " KB)!\nTelegram Cloud limits bot file downloads to 20 MB.");
           } else {
             startFileUpload(fid, fname, fsize);
           }

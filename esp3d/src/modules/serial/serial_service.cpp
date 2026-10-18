@@ -25,6 +25,9 @@
 #include "../../core/esp3d_string.h"
 #include "../authentication/authentication_service.h"
 #include "serial_service.h"
+#if defined(NOTIFICATION_FEATURE)
+#include "../telegram_monitor/telegram_monitor.h"
+#endif
 
 extern HardwareSerial *Serials[];
 
@@ -150,6 +153,17 @@ bool ESP3DSerialService::dispatch(ESP3DMessage *message) {
   bool done = false;
   // Only is serial service is started
   if (_started) {
+#if defined(NOTIFICATION_FEATURE)
+    // If a G-code file upload is actively streaming over serial to the SD card,
+    // suppress background queries (like M105, M114, M27 from the web dashboard)
+    // so they do not interrupt or desynchronize Marlin's M28 line numbers!
+    if (telegram_monitor.isUploading()) {
+      if (message) {
+        esp3d_message_manager.deleteMsg(message);
+      }
+      return true; // Mark as handled so queues don't stall
+    }
+#endif
     // Only if message is not null
     if (message) {
       // if message is not null

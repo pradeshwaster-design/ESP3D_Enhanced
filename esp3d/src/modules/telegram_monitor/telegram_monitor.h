@@ -42,6 +42,7 @@ class TelegramMonitor {
   void begin();
   void handle();
   void parseSerialData(const uint8_t* data, size_t size);
+  bool isUploading() const { return _uploadState != UPLOAD_IDLE; }
 
  private:
   bool _started;
