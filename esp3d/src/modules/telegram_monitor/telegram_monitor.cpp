@@ -1,22 +1,26 @@
 /*
   telegram_monitor.cpp - 2-Way Interactive Telegram Monitor & Remote Control
 
-  V5 Improvements:
-  1. Clickable single-tap commands (no spaces):
+  V6 Improvements:
+  1. Real hardware-verified reboot tracking:
+     - M112 (Emergency Stop) disables STM32 interrupts and halts the CPU.
+     - Bot NEVER blindly clears _isKilled upon typing a command!
+     - Auto-detects physical power cycle / reboot when Marlin outputs boot lines
+       (echo:start, Marlin, SD card ok, Power On Reset, External Reset)
+     - Dispatches "✅ Printer Reboot Detected!" Telegram notification automatically.
+  2. Active ping verification (/reboot or /check):
+     - Sends M999 + M105 and waits up to 3.5s for Marlin response.
+     - If Marlin responds with "ok T:", clears halt state and confirms online.
+     - If Marlin does not respond (MCU still halted), informs user that physical
+       power cycle (switch OFF -> ON) is required.
+  3. Absolute command lock when halted:
+     - While _isKilled is true, /home, /print, /load, /unload, /hotend, /bed,
+       /preheat, /pause, /resume, /stop, /purge, /continue are strictly blocked.
+     - /status and /lcd accurately report "🚨 HALTED (Reset Required)".
+  4. Clickable single-tap commands:
      - /preheat_pla, /preheat_petg, /home_all, /home_x, /home_y, /home_z
      - SD card files include direct /print_<n> clickable links
-  2. Separate /temp (read-only query) vs /hotend <deg> (set extruder) vs /bed <deg> (set bed)
-  3. Stricter validation rules:
-     - /purge requires hotend >= 170C AND printer paused/prompt active
-     - /continue requires printer paused or prompt active
-     - /load and /unload blocked while printing OR if hotend < 170C
-  4. Marlin Emergency Stop (M112) Halt handling:
-     - Detects "Printer halted", "kill() called", "Error:STOPPED"
-     - Enters _isKilled state, locks commands, and accurately informs user
-       that Marlin hardware requires a power-cycle or /reboot (M999)
-     - Automatically clears halt state when Marlin restarts (echo:start / SD card ok)
-     - Added /reboot (M999) and /clear_halt commands
-  5. Interactive, emoji-rich, user-friendly /help command
+  5. Strict rules for /purge and /continue (cold extrusion check + pause validation)
 */
 
 #include "../../include/esp3d_config.h"
@@ -44,6 +48,10 @@ TelegramMonitor::TelegramMonitor() {
   _wasPrinting = false;
   _isPaused = false;
   _isKilled = false;
+  _checkingAlive = false;
+  _checkAliveTime = 0;
+  _notifyReboot = false;
+  _notifyHalt = false;
   _fileName = "";
   _hotendActual = 0;
   _hotendTarget = 0;
@@ -85,6 +93,10 @@ void TelegramMonitor::begin() {
   _pendingFromId = "";
   _isPaused = false;
   _isKilled = false;
+  _checkingAlive = false;
+  _checkAliveTime = 0;
+  _notifyReboot = false;
+  _notifyHalt = false;
   _autoBreakWaits = false;
   _autoBreakCount = 0;
   _lastAutoM108Time = 0;
@@ -153,21 +165,42 @@ void TelegramMonitor::parseSingleLine(const char* line) {
   // --- Marlin HALT / KILL detection ---
   if (d.indexOf("Printer halted") >= 0 || d.indexOf("kill() called") >= 0 || 
       d.indexOf("//action:kill") >= 0 || d.indexOf("Error:STOPPED") >= 0) {
+    if (!_isKilled) {
+      _notifyHalt = true;
+    }
     _isKilled = true;
     _isPrinting = false;
     _isPaused = false;
     _wasPrinting = false;
     _autoBreakWaits = false;
     _autoBreakCount = 0;
+    _checkingAlive = false;
     _marlinPrompt = "PRINTER HALTED - Please Reset";
     return;
   }
 
-  // --- Marlin Boot / Restart detection ---
-  if (d.indexOf("echo:start") >= 0 || d.indexOf("Marlin ") >= 0 || d.indexOf("SD card ok") >= 0) {
+  // --- Marlin Boot / Physical Restart detection ---
+  if (d.indexOf("echo:start") >= 0 || d.indexOf("Marlin ") >= 0 || d.indexOf("SD card ok") >= 0 ||
+      d.indexOf("Power On Reset") >= 0 || d.indexOf("External Reset") >= 0) {
+    if (_isKilled) {
+      _notifyReboot = true;
+    }
     _isKilled = false;
+    _checkingAlive = false;
     _marlinWaitingForUser = false;
     _marlinPrompt = "";
+  }
+
+  // --- Ping verification response when testing if printer is alive ---
+  if (_checkingAlive) {
+    if (d.startsWith("ok") || d.indexOf("T:") >= 0 || d.indexOf("FIRMWARE_NAME") >= 0) {
+      if (_isKilled) {
+        _notifyReboot = true;
+      }
+      _isKilled = false;
+      _checkingAlive = false;
+      _marlinPrompt = "";
+    }
   }
 
   // --- Temperature: "T:200.00 /200.00 B:50.00 /50.00" ---
@@ -229,6 +262,7 @@ void TelegramMonitor::parseSingleLine(const char* line) {
         _progress = ((float)_bytesDone / (float)_bytesTotal) * 100.0;
         _isPrinting = true;
         _isPaused = false;
+        _isKilled = false;
         _autoBreakWaits = false;
         _autoBreakCount = 0;
         _marlinWaitingForUser = false;
@@ -375,7 +409,7 @@ void TelegramMonitor::sendStatusUpdate() {
   if (!notificationsservice.started()) return;
 
   if (_isKilled) {
-    sendTelegramReply("🚨 PRINTER HALTED / KILLED!\n\nSafety shutdown active.\nPhysical reset required: Turn printer power switch OFF and ON.");
+    sendTelegramReply("🚨 PRINTER HALTED (Emergency Stop / Error)\n\nState: FROZEN / LOCKED\nLCD: PRINTER HALTED / Please Reset\n\n👉 Physical reset required:\nTurn the printer power switch OFF, wait 5 seconds, and turn it back ON.");
     return;
   }
 
@@ -409,7 +443,7 @@ void TelegramMonitor::sendIdleStatus() {
   if (!notificationsservice.started()) return;
 
   if (_isKilled) {
-    sendTelegramReply("🚨 PRINTER HALTED / KILLED!\n\nSafety shutdown active.\nPhysical reset required: Turn printer power switch OFF and ON.");
+    sendTelegramReply("🚨 PRINTER HALTED (Emergency Stop / Error)\n\nState: FROZEN / LOCKED\nLCD: PRINTER HALTED / Please Reset\n\n👉 Physical reset required:\nTurn the printer power switch OFF, wait 5 seconds, and turn it back ON.");
     return;
   }
 
@@ -462,23 +496,6 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
   String lc = cmd;
   lc.toLowerCase();
 
-  // ── Recovery Commands (Allowed even when halted) ──
-  if (lc == "/reboot" || lc == "/reset") {
-    esp3d_serial_service.writeBytes((const uint8_t*)"M999\n", 5);
-    _isKilled = false;
-    _marlinPrompt = "";
-    _marlinWaitingForUser = false;
-    sendTelegramReply("Sent M999 (Restart / Clear Stop).\nIf printer LCD still displays 'Please Reset', turn printer power switch OFF and ON.");
-    return;
-  }
-  else if (lc == "/clear_halt" || lc == "/clear") {
-    _isKilled = false;
-    _marlinPrompt = "";
-    _marlinWaitingForUser = false;
-    sendTelegramReply("Halt state cleared manually.\nPrinter state set to Idle.");
-    return;
-  }
-
   // ── Emergency Stop (Always allowed) ──
   if (lc == "/emergency") {
     esp3d_serial_service.writeBytes((const uint8_t*)"M112\n", 5);
@@ -489,14 +506,27 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     _autoBreakWaits = false;
     _autoBreakCount = 0;
     _marlinPrompt = "PRINTER HALTED - Please Reset";
-    sendTelegramReply("🚨 EMERGENCY STOP (M112 sent)!\n\nAll motors and heaters killed immediately.\n⚠️ Marlin is now HALTED. Printer hardware is locked.\n👉 Turn printer power switch OFF and ON to recover, or send /reboot.");
+    sendTelegramReply("🚨 EMERGENCY STOP (M112 sent)!\n\nAll motors and heaters killed immediately.\n⚠️ Marlin CPU is permanently HALTED for safety.\n\n👉 To recover:\n1. Turn the printer's power switch OFF.\n2. Wait 5 seconds.\n3. Turn the switch back ON.\n\nThe bot will automatically detect the reboot and notify you!");
+    return;
+  }
+
+  // ── Active Restart / Ping Verification ──
+  if (lc == "/reboot" || lc == "/reset" || lc == "/check") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M999\nM105\n", 10);
+    _checkingAlive = true;
+    _checkAliveTime = millis();
+    sendTelegramReply("Testing printer connection (M999 + M105)...\nChecking if Marlin responds over serial.");
+    return;
+  }
+  else if (lc == "/clear_halt" || lc == "/clear") {
+    sendTelegramReply("ℹ️ The printer CPU halts hardware execution during M112.\nTo recover, please power-cycle the printer (turn power switch OFF then ON).\nThe bot will automatically detect the reboot!");
     return;
   }
 
   // ── Read-only Status Commands (Allowed even when halted) ──
   if (lc == "/status") {
     if (_isKilled) {
-      sendTelegramReply("🚨 PRINTER HALTED / KILLED!\n\nSafety shutdown active.\nPhysical reset required: Turn printer power switch OFF and ON, or send /reboot.");
+      sendTelegramReply("🚨 PRINTER HALTED (Emergency Stop / Error)\n\nState: FROZEN / LOCKED\nLCD: PRINTER HALTED / Please Reset\n\n👉 Physical reset required:\nTurn the printer power switch OFF, wait 5 seconds, and turn it back ON.");
     } else if (_isPrinting || _isPaused) {
       sendStatusUpdate();
     } else {
@@ -505,6 +535,10 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     return;
   }
   else if (lc == "/temp") {
+    if (_isKilled) {
+      sendTelegramReply("🚨 PRINTER HALTED!\nTemperatures cannot be verified until the printer is reset.");
+      return;
+    }
     String msg = "Temperatures:\n";
     msg += "Hotend: " + String(_hotendActual, 1) + " / " + String(_hotendTarget, 0) + "C\n";
     msg += "Bed: " + String(_bedActual, 1) + " / " + String(_bedTarget, 0) + "C";
@@ -512,9 +546,11 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     return;
   }
   else if (lc == "/pos" || lc == "/position") {
-    if (!_isKilled) {
-      esp3d_serial_service.writeBytes((const uint8_t*)"M114\n", 5);
+    if (_isKilled) {
+      sendTelegramReply("🚨 PRINTER HALTED!\nPosition is locked until the printer is reset.");
+      return;
     }
+    esp3d_serial_service.writeBytes((const uint8_t*)"M114\n", 5);
     String msg = "Tool Head Position:\n";
     msg += "X: " + String(_posX, 2) + " mm\n";
     msg += "Y: " + String(_posY, 2) + " mm\n";
@@ -553,6 +589,10 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     return;
   }
   else if (lc == "/files" || lc == "/ls") {
+    if (_isKilled) {
+      sendTelegramReply("🚨 PRINTER HALTED!\nSD card access is locked until the printer is reset.");
+      return;
+    }
     _collectingFiles = false;
     _sdFileCount = 0;
     _pendingFilesRequest = true;
@@ -568,7 +608,8 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     msg += "/temp — Check temperatures\n";
     msg += "/pos — Toolhead coordinates\n";
     msg += "/display — LCD info & prompt\n";
-    msg += "/files — Browse SD card files\n\n";
+    msg += "/files — Browse SD card files\n";
+    msg += "/check — Test printer connection\n\n";
     msg += "⏯️ PRINT CONTROL:\n";
     msg += "/pause — Pause print safely\n";
     msg += "/resume — Resume print\n";
@@ -591,17 +632,17 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     msg += "/home_y — Home Y axis\n";
     msg += "/home_z — Home Z axis\n\n";
     msg += "🔄 RECOVERY:\n";
-    msg += "/reboot — Clear error (M999)\n";
-    msg += "/clear_halt — Clear halt state";
+    msg += "/reboot — Test/restart (M999)\n";
+    msg += "Power switch OFF->ON to reset halt";
     sendTelegramReply(msg);
     return;
   }
 
   // ──────────────────────────────────────────────────────────
-  // All operational commands below REQUIRE printer NOT halted!
+  // STRICT LOCK: All operational commands below REQUIRE printer NOT halted!
   // ──────────────────────────────────────────────────────────
   if (_isKilled) {
-    sendTelegramReply("⚠️ Printer is in EMERGENCY HALTED state!\nCommands are locked.\nPlease power cycle the printer (turn switch OFF then ON) to reset.");
+    sendTelegramReply("❌ Printer is HALTED (M112 Safety Lock)!\nPrinter hardware is frozen and cannot execute commands.\n👉 Turn printer power switch OFF and back ON to reset.");
     return;
   }
 
@@ -919,10 +960,30 @@ void TelegramMonitor::handle() {
   uint32_t now = millis();
 
   // ────────────────────────────────────────────────────
-  // PRIORITY 0: Auto-respond to Marlin prompts & wait loops
-  // Sends M876 S1 (select Continue) + M108 (break wait)
+  // Priority Alerts: Halt notification and Reboot notification
+  // Dispatched safely from main loop context (never from ISR)
   // ────────────────────────────────────────────────────
-  if (_autoBreakWaits && _needAutoM108 && _autoBreakCount > 0) {
+  if (_notifyHalt) {
+    _notifyHalt = false;
+    sendTelegramReply("🚨 PRINTER HALTED (Emergency Stop / Error)!\n\nAll motors and heaters are killed.\n⚠️ Marlin CPU is halted. Hardware reset required.\n👉 Turn printer power switch OFF, wait 5s, then ON.");
+    return;
+  }
+
+  if (_notifyReboot) {
+    _notifyReboot = false;
+    sendTelegramReply("✅ Printer Reboot Detected!\nMarlin has restarted and is back ONLINE (Idle).");
+    return;
+  }
+
+  // Ping timeout when testing if printer responds
+  if (_checkingAlive && (now - _checkAliveTime >= 3500)) {
+    _checkingAlive = false;
+    sendTelegramReply("❌ Printer did NOT respond! The MCU is still HALTED.\n\n👉 You MUST physically power cycle the printer: Turn the printer's power switch OFF, wait 5 seconds, then turn it back ON.");
+    return;
+  }
+
+  // Auto-respond to Marlin prompts & wait loops
+  if (_autoBreakWaits && _needAutoM108 && _autoBreakCount > 0 && !_isKilled) {
     if (now - _lastAutoM108Time >= AUTO_M108_COOLDOWN) {
       esp3d_serial_service.writeBytes((const uint8_t*)"M876 S1\nM108\n", 13);
       _autoBreakCount--;
@@ -935,14 +996,14 @@ void TelegramMonitor::handle() {
     }
   }
 
-  // Timeout: if 30s pass with autoBreakWaits still active, stop to prevent loops
+  // Timeout: if 30s pass with autoBreakWaits still active, stop
   if (_autoBreakWaits && (now - _lastAutoM108Time >= 30000)) {
     _autoBreakWaits = false;
     _autoBreakCount = 0;
     _needAutoM108 = false;
   }
 
-  // 1. Execute queued command (safe: SSL connection already closed)
+  // 1. Execute queued command
   if (_pendingCommand.length() > 0) {
     String cmd = _pendingCommand;
     String fid = _pendingFromId;
@@ -1001,7 +1062,7 @@ void TelegramMonitor::handle() {
     esp3d_serial_service.writeBytes((const uint8_t*)"M31\n", 4);
   }
 
-  // 7. Detect print finished (only when NOT paused and NOT auto-breaking)
+  // 7. Detect print finished (only when NOT paused, NOT auto-breaking, NOT killed)
   if (!_isPrinting && !_isPaused && !_autoBreakWaits && !_isKilled && _wasPrinting) {
     sendPrintFinished();
     _wasPrinting = false;

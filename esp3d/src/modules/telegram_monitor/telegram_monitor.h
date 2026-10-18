@@ -1,14 +1,14 @@
 /*
   telegram_monitor.h - 2-Way Interactive Telegram Monitor & Remote Control
   
-  V5 - Clickable Telegram commands, M112 Halt tracking, Strict command validation:
-  - Clickable single-tap commands (no spaces): /preheat_pla, /preheat_petg, /home_all, /print_<n>
-  - Direct SD print links (/print_1, /print_2...)
-  - Separate /temp (query) vs /hotend <deg> (set hotend) vs /bed <deg> (set bed)
-  - Strict rules for /purge and /continue (cold extrusion check + pause validation)
-  - Marlin M112 emergency halt detection & state lock (_isKilled)
-  - Recovery commands: /reboot (M999) and /clear_halt
-  - Clean, interactive, emoji-formatted /help
+  V6 - Hardware-Verified Reboot & Strict Halt Enforcement:
+  - M112 Emergency Stop permanently halts the printer CPU (STM32 cli())
+  - Bot NEVER assumes the printer is alive until proven by serial boot message or M105/M115 response
+  - Auto-detects physical power cycle / reset via Marlin boot messages (echo:start, SD card ok)
+  - Active ping verification via /reboot or /check
+  - Blocks all motion, heating, and print commands while halted
+  - Single-tap clickable commands: /preheat_pla, /preheat_petg, /home_all, /print_<n>
+  - Strict validation for /purge, /continue, /load, /unload
 */
 
 #ifndef _TELEGRAM_MONITOR_H
@@ -50,6 +50,11 @@ class TelegramMonitor {
   bool _wasPrinting;
   bool _isPaused;               // True when M25 pause is active
   bool _isKilled;               // True when M112 emergency stop / Marlin halt is active
+  bool _checkingAlive;          // True when /reboot or /check is waiting for response
+  uint32_t _checkAliveTime;     // Timestamp when check was initiated
+  bool _notifyReboot;           // Flag: set in ISR when boot signature seen, handled in handle()
+  bool _notifyHalt;             // Flag: set in ISR when halt signature seen, handled in handle()
+
   String _fileName;
   float _hotendActual;
   float _hotendTarget;
