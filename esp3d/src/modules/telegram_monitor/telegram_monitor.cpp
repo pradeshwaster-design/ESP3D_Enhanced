@@ -69,6 +69,7 @@ TelegramMonitor::TelegramMonitor() {
   _uploadRequestedResend = 0;
   _uploadLastResendLine = 0;
   _uploadResendCount = 0;
+  _uploadReconnectCount = 0;
   _stopCooldownUntil = 0;
   _isPrinting = false;
   _wasPrinting = false;
@@ -145,6 +146,7 @@ void TelegramMonitor::begin() {
   _uploadRequestedResend = 0;
   _uploadLastResendLine = 0;
   _uploadResendCount = 0;
+  _uploadReconnectCount = 0;
   _stopCooldownUntil = 0;
   _isPaused = false;
   _isKilled = false;
@@ -720,6 +722,7 @@ void TelegramMonitor::startFileUpload(const String& fileId, const String& fileNa
   _uploadRequestedResend = 0;
   _uploadLastResendLine = 0;
   _uploadResendCount = 0;
+  _uploadReconnectCount = 0;
   _uploadStreamHost = "";
   _uploadStreamPort = 443;
   _uploadStreamPath = "";
@@ -748,8 +751,8 @@ void TelegramMonitor::startFileUpload(const String& fileId, const String& fileNa
 void TelegramMonitor::handleTelegramFileUpload() {
   uint32_t now = millis();
 
-  // Inactivity timeout guard (35 seconds without receiving data)
-  if (now - _uploadLastActivity > 35000) {
+  // Inactivity timeout guard (60 seconds without receiving data)
+  if (now - _uploadLastActivity > 60000) {
     sendUploadSerial("\nM29\n");
     _uploadClient.stop();
     _uploadState = UPLOAD_IDLE;
@@ -826,23 +829,36 @@ void TelegramMonitor::handleTelegramFileUpload() {
 
   // ── STATE 2: Connect to File Stream, Follow Redirects, and Send M28 to Marlin ──
   if (_uploadState == UPLOAD_CONNECT_STREAM) {
+    _uploadClient.stop();
     _uploadClient.setInsecure();
     _uploadClient.setTimeout(8000); // 8000 ms
     if (!_uploadClient.connect(_uploadStreamHost.c_str(), _uploadStreamPort)) {
-      _uploadState = UPLOAD_IDLE;
-      sendTelegramReply("❌ Failed to connect to storage: " + _uploadStreamHost);
+      _uploadReconnectCount++;
+      if (_uploadReconnectCount > 30) {
+        if (_uploadBytesSent > 0) sendUploadSerial("\nM29\n");
+        _uploadState = UPLOAD_IDLE;
+        sendTelegramReply("❌ Failed to connect to storage: " + _uploadStreamHost);
+      }
       return;
     }
 
-    String req = "GET " + _uploadStreamPath + " HTTP/1.1\r\nHost: " + _uploadStreamHost + "\r\nConnection: close\r\n\r\n";
+    String req = "GET " + _uploadStreamPath + " HTTP/1.1\r\nHost: " + _uploadStreamHost + "\r\n";
+    if (_uploadBytesSent > 0) {
+      req += "Range: bytes=" + String(_uploadBytesSent) + "-\r\n";
+    }
+    req += "Connection: close\r\n\r\n";
     _uploadClient.print(req);
 
     uint32_t t0 = millis();
     while (!_uploadClient.available() && (millis() - t0 < 8000)) delay(10);
     if (!_uploadClient.available()) {
+      _uploadReconnectCount++;
       _uploadClient.stop();
-      _uploadState = UPLOAD_IDLE;
-      sendTelegramReply("❌ Timeout opening file stream from " + _uploadStreamHost);
+      if (_uploadReconnectCount > 30) {
+        if (_uploadBytesSent > 0) sendUploadSerial("\nM29\n");
+        _uploadState = UPLOAD_IDLE;
+        sendTelegramReply("❌ Timeout opening file stream from " + _uploadStreamHost);
+      }
       return;
     }
 
@@ -861,9 +877,13 @@ void TelegramMonitor::handleTelegramFileUpload() {
     }
 
     if (!inBody) {
+      _uploadReconnectCount++;
       _uploadClient.stop();
-      _uploadState = UPLOAD_IDLE;
-      sendTelegramReply("❌ Invalid HTTP response from " + _uploadStreamHost);
+      if (_uploadReconnectCount > 30) {
+        if (_uploadBytesSent > 0) sendUploadSerial("\nM29\n");
+        _uploadState = UPLOAD_IDLE;
+        sendTelegramReply("❌ Invalid HTTP response from " + _uploadStreamHost);
+      }
       return;
     }
 
@@ -878,6 +898,7 @@ void TelegramMonitor::handleTelegramFileUpload() {
     if (httpCode == 301 || httpCode == 302 || httpCode == 303 || httpCode == 307 || httpCode == 308) {
       _uploadRedirectCount++;
       if (_uploadRedirectCount > 5) {
+        if (_uploadBytesSent > 0) sendUploadSerial("\nM29\n");
         _uploadClient.stop();
         _uploadState = UPLOAD_IDLE;
         sendTelegramReply("❌ Too many redirects from Telegram storage!");
@@ -896,6 +917,7 @@ void TelegramMonitor::handleTelegramFileUpload() {
       _uploadClient.stop();
 
       if (loc.length() == 0) {
+        if (_uploadBytesSent > 0) sendUploadSerial("\nM29\n");
         _uploadState = UPLOAD_IDLE;
         sendTelegramReply("❌ Redirect without Location header from storage!");
         return;
@@ -931,46 +953,54 @@ void TelegramMonitor::handleTelegramFileUpload() {
       return;
     }
 
-    // If HTTP error (not 200)
-    if (httpCode != 200 && httpCode != 0) {
+    // Check for HTTP errors (expect 200 on initial connect, or 206 Partial Content on resume)
+    bool isExpectedCode = (httpCode == 200 || httpCode == 206);
+    if (!isExpectedCode && httpCode != 0) {
+      if (_uploadBytesSent > 0) sendUploadSerial("\nM29\n");
       _uploadClient.stop();
       _uploadState = UPLOAD_IDLE;
       sendTelegramReply("❌ Telegram storage error: HTTP " + String(httpCode));
       return;
     }
 
-    // Parse Content-Length header for exact byte count
-    int clPos = headerBuf.indexOf("Content-Length:");
-    if (clPos < 0) clPos = headerBuf.indexOf("content-length:");
-    if (clPos >= 0) {
-      int s = clPos + 15;
-      while (s < (int)headerBuf.length() && headerBuf.charAt(s) == ' ') s++;
-      int e = s;
-      while (e < (int)headerBuf.length() && isDigit(headerBuf.charAt(e))) e++;
-      if (e > s) {
-        uint32_t cl = headerBuf.substring(s, e).toInt();
-        if (cl > 0) _uploadFileSize = cl;
+    // Reset redirect and reconnect counters on successful connection
+    _uploadRedirectCount = 0;
+    _uploadReconnectCount = 0;
+
+    // Only on initial connection (_uploadBytesSent == 0): parse total file size and start M28
+    if (_uploadBytesSent == 0) {
+      int clPos = headerBuf.indexOf("Content-Length:");
+      if (clPos < 0) clPos = headerBuf.indexOf("content-length:");
+      if (clPos >= 0) {
+        int s = clPos + 15;
+        while (s < (int)headerBuf.length() && headerBuf.charAt(s) == ' ') s++;
+        int e = s;
+        while (e < (int)headerBuf.length() && isDigit(headerBuf.charAt(e))) e++;
+        if (e > s) {
+          uint32_t cl = headerBuf.substring(s, e).toInt();
+          if (cl > 0) _uploadFileSize = cl;
+        }
       }
+
+      // Initialize Marlin line number counter and start SD saving
+      sendUploadSerial("M110 N0\n");
+      delay(50);
+      String m28 = "M28 " + _uploadSdName + "\n";
+      sendUploadSerial(m28);
+      delay(100);
+
+      _uploadLineNum = 0;
+      _uploadLineBuffer = "";
+      _uploadInFlight = 0;
+      _uploadLastOkTime = millis();
+      _uploadLastProgressReportTime = millis();
+      _uploadLastProgressPct = 0;
+      _uploadRequestedResend = 0;
+      _uploadLastResendLine = 0;
+      _uploadResendCount = 0;
     }
 
-    // Initialize Marlin line number counter and start SD saving
-    sendUploadSerial("M110 N0\n");
-    delay(50);
-    String m28 = "M28 " + _uploadSdName + "\n";
-    sendUploadSerial(m28);
-    delay(100);
-
-    _uploadLineNum = 0;
-    _uploadBytesSent = 0;
-    _uploadLineBuffer = "";
-    _uploadInFlight = 0;
     _uploadLastActivity = millis();
-    _uploadLastOkTime = millis();
-    _uploadLastProgressReportTime = millis();
-    _uploadLastProgressPct = 0;
-    _uploadRequestedResend = 0;
-    _uploadLastResendLine = 0;
-    _uploadResendCount = 0;
     _uploadState = UPLOAD_STREAMING;
     return;
   }
@@ -979,16 +1009,28 @@ void TelegramMonitor::handleTelegramFileUpload() {
   if (_uploadState == UPLOAD_STREAMING) {
     // Check if entire file has been downloaded from Telegram
     bool downloadComplete = (_uploadFileSize > 0 && _uploadBytesSent >= _uploadFileSize);
-    if (!downloadComplete && !_uploadClient.connected() && !_uploadClient.available()) {
-      // Socket closed by server: check if we got within 128 bytes of file size (EOF)
-      if (_uploadBytesSent > 0 && (_uploadFileSize == 0 || _uploadBytesSent + 128 >= _uploadFileSize)) {
-        downloadComplete = true;
-      } else {
-        // Premature disconnection
-        sendUploadSerial("\nM29\n");
+
+    // Auto-Resume: detect if connection closed or stalled before file completes
+    if (!downloadComplete) {
+      bool needReconnect = false;
+      if (!_uploadClient.connected()) {
+        needReconnect = true;
+      } else if (!_uploadClient.available() && (now - _uploadLastActivity > 4000)) {
+        needReconnect = true;
+      }
+
+      if (needReconnect) {
+        _uploadReconnectCount++;
+        if (_uploadReconnectCount > 30) {
+          sendUploadSerial("\nM29\n");
+          _uploadClient.stop();
+          _uploadState = UPLOAD_IDLE;
+          sendTelegramReply("❌ Upload failed: lost connection at " + String(_uploadBytesSent / 1024) + " KB after 30 reconnect attempts.");
+          return;
+        }
         _uploadClient.stop();
-        _uploadState = UPLOAD_IDLE;
-        sendTelegramReply("❌ Upload interrupted: server disconnected after " + String(_uploadBytesSent / 1024) + " KB of " + String(_uploadFileSize / 1024) + " KB.\nSD file closed.");
+        _uploadState = UPLOAD_CONNECT_STREAM; // Automatically resumes via Range: bytes=<_uploadBytesSent>-
+        _uploadLastActivity = millis();
         return;
       }
     }
@@ -1093,7 +1135,13 @@ void TelegramMonitor::handleTelegramFileUpload() {
         uint32_t bytesLeft = (_uploadFileSize > _uploadBytesSent) ? (_uploadFileSize - _uploadBytesSent) : 0;
         uint32_t secLeft = (bytesLeft / 8500) + 1;
         String remStr = (secLeft >= 60) ? (String(secLeft / 60) + "m " + String(secLeft % 60) + "s") : (String(secLeft) + "s");
+
+        // Safely close stream client before sending Telegram reply so 100% free heap is available
+        _uploadClient.stop();
         sendTelegramReply("⏳ Uploading " + _uploadSdName + ": " + String(pct) + "% (" + String(_uploadBytesSent / 1024) + "/" + String(_uploadFileSize / 1024) + " KB)\n~" + remStr + " remaining...");
+        _uploadState = UPLOAD_CONNECT_STREAM; // Resumes immediately with Range: bytes=_uploadBytesSent-
+        _uploadLastActivity = millis();
+        return;
       }
     }
 
@@ -1102,6 +1150,7 @@ void TelegramMonitor::handleTelegramFileUpload() {
       char c = _uploadClient.read();
       _uploadBytesSent++;
       _uploadLastActivity = millis();
+      _uploadReconnectCount = 0; // Successful byte received resets reconnect count
 
       if (c == '\r') continue;
       if (c == '\n') {

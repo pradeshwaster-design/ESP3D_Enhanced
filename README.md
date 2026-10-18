@@ -168,6 +168,7 @@ Once flashed, all future firmware upgrades can be performed over Wi-Fi without c
 
 ## 📋 Version History & Changelog
 
+- **v1.18.0 (V19)**: HTTP Range auto-resume engine (`Range: bytes=start-`) and heap-isolated streaming for multi-chunk uploads up to 20 MB.
 - **v1.17.0 (V18)**: Telegram Cloud 20 MB CDN redirect engine (HTTP 302/307) and 35s upload timeout.
 - **v1.16.0 (V17)**: Bulletproof hardware serial mutex lock and strict ping-pong `ok` synchronization.
 - **v1.15.0 (V16)**: Remote SD file deletion (`/del`, `/del_<n>`) and dynamic upload duration estimator.

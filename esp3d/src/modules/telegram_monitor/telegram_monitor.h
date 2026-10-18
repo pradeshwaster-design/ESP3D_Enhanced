@@ -83,6 +83,7 @@ class TelegramMonitor {
   uint32_t _uploadRequestedResend;
   uint32_t _uploadLastResendLine;
   uint8_t _uploadResendCount;
+  uint8_t _uploadReconnectCount;
 
   // Stop cooldown guard (suppresses trailing SD progress reports after /stop)
   uint32_t _stopCooldownUntil;
