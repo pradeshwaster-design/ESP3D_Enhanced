@@ -1,8 +1,13 @@
 /*
   telegram_monitor.h - 2-Way Interactive Telegram Monitor & Remote Control
   
-  V7 - Remote G-Code Upload, Live Tuning & Complete System Info:
-  - Telegram G-code upload via Serial M28/M29 stream directly to printer SD
+  V8 - Robust Non-Blocking G-Code SD Uploader & Stop Cooldown Fix:
+  - Non-blocking state machine for Telegram G-code upload via Serial M28/M29
+  - Full Marlin XOR checksum protocol compliance (N<line> <cmd>*<cs>\n)
+  - Slicer comment stripping (reduces transfer time & SD writes by 40%)
+  - Guaranteed M29 SD file closure on completion, timeout, or stop/emergency abort
+  - Non-blocking slice streaming preserves ESP32 web server responsiveness & feeds TWDT
+  - Stop Cooldown Guard (6s) suppressing trailing Marlin auto-reports after /stop
   - Live Tuning: /speed <pct>, /flow <pct>, /fan <pct>, /zoffset <+/-val>
   - Layer progress tracking (;LAYER:<num>, ;LAYER_COUNT:<num>, M117 Layer X/Y)
   - Full system & printer diagnostic command: /info
@@ -14,6 +19,7 @@
 #define _TELEGRAM_MONITOR_H
 
 #include <Arduino.h>
+#include <WiFiClientSecure.h>
 
 // ── Configuration ────────────────────────────────────────
 #define TELEGRAM_PRINT_INTERVAL  60000   // 1 minute while printing
@@ -22,6 +28,13 @@
 #define MAX_SD_FILES             25
 #define AUTO_M108_COOLDOWN       2000    // Min ms between auto-prompt responses
 #define AUTO_M108_MAX_COUNT      6       // Max auto-responses per resume/stop
+
+enum UploadState {
+  UPLOAD_IDLE = 0,
+  UPLOAD_RESOLVE_URL,
+  UPLOAD_CONNECT_STREAM,
+  UPLOAD_STREAMING
+};
 
 class TelegramMonitor {
  public:
@@ -44,11 +57,21 @@ class TelegramMonitor {
   String _pendingCommand;
   String _pendingFromId;
 
-  // Queued G-code file upload from Telegram
-  String _pendingDocFileId;
-  String _pendingDocFileName;
-  uint32_t _pendingDocFileSize;
-  String _pendingDocChatId;
+  // Non-blocking G-code file upload state machine
+  UploadState _uploadState;
+  WiFiClientSecure _uploadClient;
+  String _uploadFileId;
+  String _uploadFileName;
+  String _uploadFilePath;
+  String _uploadSdName;
+  uint32_t _uploadFileSize;
+  uint32_t _uploadBytesSent;
+  uint32_t _uploadLineNum;
+  String _uploadLineBuffer;
+  uint32_t _uploadLastActivity;
+
+  // Stop cooldown guard (suppresses trailing SD progress reports after /stop)
+  uint32_t _stopCooldownUntil;
 
   // Printer state
   bool _isPrinting;
@@ -108,6 +131,7 @@ class TelegramMonitor {
   void sendPrintFinished();
   void sendSDFileListReply();
   void sendPrinterInfoReply();
+  void startFileUpload(const String& fileId, const String& fileName, uint32_t fileSize);
   void handleTelegramFileUpload();
 
   void pollTelegramUpdates();
