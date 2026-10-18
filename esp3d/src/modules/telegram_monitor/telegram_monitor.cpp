@@ -1,26 +1,23 @@
 /*
   telegram_monitor.cpp - 2-Way Interactive Telegram Monitor & Remote Control
 
-  V6 Improvements:
-  1. Real hardware-verified reboot tracking:
-     - M112 (Emergency Stop) disables STM32 interrupts and halts the CPU.
-     - Bot NEVER blindly clears _isKilled upon typing a command!
-     - Auto-detects physical power cycle / reboot when Marlin outputs boot lines
-       (echo:start, Marlin, SD card ok, Power On Reset, External Reset)
-     - Dispatches "✅ Printer Reboot Detected!" Telegram notification automatically.
-  2. Active ping verification (/reboot or /check):
-     - Sends M999 + M105 and waits up to 3.5s for Marlin response.
-     - If Marlin responds with "ok T:", clears halt state and confirms online.
-     - If Marlin does not respond (MCU still halted), informs user that physical
-       power cycle (switch OFF -> ON) is required.
-  3. Absolute command lock when halted:
-     - While _isKilled is true, /home, /print, /load, /unload, /hotend, /bed,
-       /preheat, /pause, /resume, /stop, /purge, /continue are strictly blocked.
-     - /status and /lcd accurately report "🚨 HALTED (Reset Required)".
-  4. Clickable single-tap commands:
-     - /preheat_pla, /preheat_petg, /home_all, /home_x, /home_y, /home_z
-     - SD card files include direct /print_<n> clickable links
-  5. Strict rules for /purge and /continue (cold extrusion check + pause validation)
+  V7 Feature Set:
+  1. Telegram G-code Upload to SD Card:
+     - Upload any .gcode file directly in Telegram chat
+     - Downloads from Telegram Cloud and streams to printer SD card via M28/M29
+     - Automatically cleans filename to 8.3 FAT format and provides /print link
+  2. Live Print Tuning:
+     - /speed <pct> (M220 S<pct>) - Adjust print speed (10% to 300%)
+     - /flow <pct> (M221 S<pct>) - Adjust flow rate (50% to 150%)
+     - /fan <pct> (M106 S<pwm>) - Control part cooling fan (0% to 100%)
+     - /zoffset <val> (M290 Z<val>) - Live Z-babystepping from phone
+  3. Layer Progress Tracking:
+     - Parses ;LAYER:<num>, ;LAYER_COUNT:<num>, and M117 Layer messages
+     - Displays current and total layer counts in /status updates
+  4. Comprehensive System Diagnostic:
+     - /info displays complete hardware, firmware, kinematics, Z-offset,
+       speeds, temperatures, WiFi RSSI, RAM, and uptime
+  5. Reliable Hardware-Verified Reboot & Safety Lock
 */
 
 #include "../../include/esp3d_config.h"
@@ -44,6 +41,10 @@ TelegramMonitor::TelegramMonitor() {
   _lastUpdateId = 0;
   _pendingCommand = "";
   _pendingFromId = "";
+  _pendingDocFileId = "";
+  _pendingDocFileName = "";
+  _pendingDocFileSize = 0;
+  _pendingDocChatId = "";
   _isPrinting = false;
   _wasPrinting = false;
   _isPaused = false;
@@ -66,7 +67,13 @@ TelegramMonitor::TelegramMonitor() {
   _posE = 0;
   _feedrate = 100;
   _flowrate = 100;
+  _fanPct = 0;
+  _currentLayer = 0;
+  _totalLayers = 0;
   _printTime = "";
+  _firmwareVersion = "Marlin (SKR Mini E3 V3.0)";
+  _machineType = "Ender-3";
+  _zOffset = "0.00 mm";
   _autoBreakWaits = false;
   _autoBreakCount = 0;
   _lastAutoM108Time = 0;
@@ -91,12 +98,21 @@ void TelegramMonitor::begin() {
   _lastUpdateId = 0;
   _pendingCommand = "";
   _pendingFromId = "";
+  _pendingDocFileId = "";
+  _pendingDocFileName = "";
+  _pendingDocFileSize = 0;
+  _pendingDocChatId = "";
   _isPaused = false;
   _isKilled = false;
   _checkingAlive = false;
   _checkAliveTime = 0;
   _notifyReboot = false;
   _notifyHalt = false;
+  _feedrate = 100;
+  _flowrate = 100;
+  _fanPct = 0;
+  _currentLayer = 0;
+  _totalLayers = 0;
   _autoBreakWaits = false;
   _autoBreakCount = 0;
   _lastAutoM108Time = 0;
@@ -107,6 +123,9 @@ void TelegramMonitor::begin() {
   _collectingFiles = false;
   _pendingFilesRequest = false;
   _readyToSendFileList = false;
+
+  // Initial query for printer hardware info
+  esp3d_serial_service.writeBytes((const uint8_t*)"M115\nM851\n", 10);
 }
 
 // ── Time helpers ─────────────────────────────────────────
@@ -200,6 +219,67 @@ void TelegramMonitor::parseSingleLine(const char* line) {
       _isKilled = false;
       _checkingAlive = false;
       _marlinPrompt = "";
+    }
+  }
+
+  // --- M115 Firmware Info parsing ---
+  int fnPos = d.indexOf("FIRMWARE_NAME:");
+  if (fnPos >= 0) {
+    int s = fnPos + 14;
+    int e = d.indexOf(" SOURCE_CODE_URL", s);
+    if (e < 0) e = d.indexOf(';', s);
+    if (e < 0) e = d.length();
+    _firmwareVersion = d.substring(s, e);
+    _firmwareVersion.trim();
+  }
+  int mtPos = d.indexOf("MACHINE_TYPE:");
+  if (mtPos >= 0) {
+    int s = mtPos + 13;
+    int e = d.indexOf(" EXTRUDER_COUNT", s);
+    if (e < 0) e = d.indexOf(';', s);
+    if (e < 0) e = d.length();
+    _machineType = d.substring(s, e);
+    _machineType.trim();
+  }
+
+  // --- M851 Z-Offset parsing ---
+  if (d.indexOf("Probe Z-Offset") >= 0 || d.indexOf("Probe Offset") >= 0 || d.indexOf("M851 Z") >= 0) {
+    int zPos = d.indexOf("Z:");
+    if (zPos < 0) zPos = d.indexOf("Z");
+    if (zPos >= 0) {
+      int s = zPos + (d.charAt(zPos + 1) == ':' ? 2 : 1);
+      int e = d.indexOf(' ', s);
+      if (e < 0) e = d.length();
+      _zOffset = d.substring(s, e) + " mm";
+      _zOffset.trim();
+    }
+  }
+
+  // --- Layer parsing from slicer comments or M117 ---
+  int lPos = d.indexOf(";LAYER:");
+  if (lPos >= 0) {
+    int e = lPos + 7;
+    while (e < (int)d.length() && isDigit(d.charAt(e))) e++;
+    _currentLayer = d.substring(lPos + 7, e).toInt() + 1;
+  }
+  int lcPos = d.indexOf(";LAYER_COUNT:");
+  if (lcPos >= 0) {
+    int e = lcPos + 13;
+    while (e < (int)d.length() && isDigit(d.charAt(e))) e++;
+    _totalLayers = d.substring(lcPos + 13, e).toInt();
+  }
+  int layPos = d.indexOf("Layer ");
+  if (layPos < 0) layPos = d.indexOf("layer ");
+  if (layPos >= 0) {
+    int s = layPos + 6;
+    int slash = d.indexOf('/', s);
+    if (slash < 0) slash = d.indexOf(" of ", s);
+    if (slash > s) {
+      _currentLayer = d.substring(s, slash).toInt();
+      int totStart = slash + (d.charAt(slash) == '/' ? 1 : 4);
+      int totEnd = totStart;
+      while (totEnd < (int)d.length() && isDigit(d.charAt(totEnd))) totEnd++;
+      if (totEnd > totStart) _totalLayers = d.substring(totStart, totEnd).toInt();
     }
   }
 
@@ -422,6 +502,14 @@ void TelegramMonitor::sendStatusUpdate() {
   String msg = "Print Status\n";
   if (_fileName.length() > 0) msg += "File: " + _fileName + "\n";
   msg += buildProgressBar(_progress) + " " + String(_progress, 1) + "%\n";
+
+  // Layer progress
+  if (_currentLayer > 0 && _totalLayers > 0) {
+    msg += "Layer: " + String(_currentLayer) + " / " + String(_totalLayers) + "\n";
+  } else if (_currentLayer > 0) {
+    msg += "Layer: " + String(_currentLayer) + "\n";
+  }
+
   if (_isPaused) {
     if (_marlinWaitingForUser && _marlinPrompt.length() > 0) {
       msg += "PAUSED - LCD: " + _marlinPrompt + "\n";
@@ -435,7 +523,9 @@ void TelegramMonitor::sendStatusUpdate() {
   msg += "Time Left: ~" + timeLeft + "\n";
   msg += "Hotend: " + String(_hotendActual, 0) + "/" + String(_hotendTarget, 0) + "C\n";
   msg += "Bed: " + String(_bedActual, 0) + "/" + String(_bedTarget, 0) + "C\n";
-  msg += "Z: " + String(_zHeight, 1) + "mm";
+  msg += "Z: " + String(_zHeight, 1) + "mm\n";
+  msg += "Speed: " + String(_feedrate) + "% | Flow: " + String(_flowrate) + "%\n";
+  msg += "Fan: " + String(_fanPct) + "%";
   notificationsservice.sendMSG("ESP3D", msg.c_str());
 }
 
@@ -449,7 +539,8 @@ void TelegramMonitor::sendIdleStatus() {
 
   String msg = "Printer Status: Idle\n";
   msg += "Hotend: " + String(_hotendActual, 0) + "/" + String(_hotendTarget, 0) + "C\n";
-  msg += "Bed: " + String(_bedActual, 0) + "/" + String(_bedTarget, 0) + "C";
+  msg += "Bed: " + String(_bedActual, 0) + "/" + String(_bedTarget, 0) + "C\n";
+  msg += "Fan: " + String(_fanPct) + "%";
   notificationsservice.sendMSG("ESP3D", msg.c_str());
 }
 
@@ -482,6 +573,202 @@ void TelegramMonitor::sendSDFileListReply() {
   }
   msg += "Tap any /print_<n> link above to start printing!";
   sendTelegramReply(msg);
+}
+
+void TelegramMonitor::sendPrinterInfoReply() {
+  String state = "Idle";
+  if (_isKilled) state = "🚨 HALTED (Reset Required)";
+  else if (_isPaused) state = "PAUSED";
+  else if (_isPrinting) state = "Printing";
+
+  String msg = "📋 PRINTER & CONTROLLER INFO\n\n";
+  msg += "🖨️ HARDWARE & FIRMWARE:\n";
+  msg += "• Firmware: " + _firmwareVersion + "\n";
+  msg += "• Machine: " + _machineType + "\n";
+  msg += "• Kinematics: Cartesian\n";
+  msg += "• Extruders: 1 Nozzle\n\n";
+
+  msg += "🎯 CALIBRATION & POSITION:\n";
+  msg += "• Probe Z-Offset: " + _zOffset + "\n";
+  msg += "• Head Coordinates:\n";
+  msg += "  X: " + String(_posX, 2) + " mm | Y: " + String(_posY, 2) + " mm\n";
+  msg += "  Z: " + String(_zHeight, 2) + " mm | E: " + String(_posE, 2) + " mm\n\n";
+
+  msg += "⚡ DYNAMICS & SPEEDS:\n";
+  msg += "• Print Speed: " + String(_feedrate) + "% (M220)\n";
+  msg += "• Flow Multiplier: " + String(_flowrate) + "% (M221)\n";
+  msg += "• Part Cooling Fan: " + String(_fanPct) + "% (M106)\n\n";
+
+  msg += "🌡️ TEMPERATURES:\n";
+  msg += "• Hotend: " + String(_hotendActual, 1) + " / " + String(_hotendTarget, 0) + "°C\n";
+  msg += "• Bed: " + String(_bedActual, 1) + " / " + String(_bedTarget, 0) + "°C\n\n";
+
+  msg += "⚙️ STATUS:\n";
+  msg += "• State: " + state + "\n";
+  if (_fileName.length() > 0) msg += "• File: " + _fileName + "\n";
+  if (_isPrinting || _isPaused) {
+    msg += "• Progress: " + String(_progress, 1) + "%\n";
+    if (_currentLayer > 0) msg += "• Layer: " + String(_currentLayer) + " / " + String(_totalLayers) + "\n";
+  }
+  msg += "\n📶 ESP3D CONTROLLER:\n";
+  msg += "• Module: ESP32-WROOM-DA (240MHz)\n";
+  msg += "• IP Address: " + WiFi.localIP().toString() + "\n";
+  msg += "• WiFi Signal: " + String(WiFi.RSSI()) + " dBm\n";
+  msg += "• Free RAM: " + String(ESP.getFreeHeap() / 1024) + " KB\n";
+  msg += "• Uptime: " + formatTime(millis() / 1000);
+
+  sendTelegramReply(msg);
+}
+
+// ── Stream Telegram G-code upload directly to Marlin SD card ──
+void TelegramMonitor::handleTelegramFileUpload() {
+  if (_pendingDocFileId.length() == 0) return;
+
+  String fileId = _pendingDocFileId;
+  String origName = _pendingDocFileName;
+  uint32_t fileSize = _pendingDocFileSize;
+  _pendingDocFileId = "";
+  _pendingDocFileName = "";
+  _pendingDocFileSize = 0;
+
+  if (_isPrinting || _isPaused) {
+    sendTelegramReply("⚠️ Cannot upload while printer is printing or paused!\nWait for print to finish or send /stop first.");
+    return;
+  }
+  if (_isKilled) {
+    sendTelegramReply("⚠️ Printer is in HALTED state!\nReset printer before uploading.");
+    return;
+  }
+
+  String lowerName = origName;
+  lowerName.toLowerCase();
+  if (!lowerName.endsWith(".gcode") && !lowerName.endsWith(".gco")) {
+    sendTelegramReply("❌ Unsupported file format!\nOnly .gcode files can be uploaded to the printer SD card.");
+    return;
+  }
+
+  if (fileSize > 5000000) {
+    sendTelegramReply("⚠️ File too large (" + String(fileSize / 1024) + " KB)!\nFor Serial M28 upload, files must be under 5 MB to prevent transmission timeouts.");
+    return;
+  }
+
+  // Create clean 8.3 FAT filename for Marlin
+  String base = origName;
+  int dot = base.lastIndexOf('.');
+  if (dot > 0) base = base.substring(0, dot);
+  String clean = "";
+  for (size_t i = 0; i < base.length() && clean.length() < 8; i++) {
+    char c = base.charAt(i);
+    if (isAlphaNumeric(c)) clean += (char)toupper(c);
+  }
+  if (clean.length() == 0) clean = "UPLOAD";
+  String sdName = clean + ".GCO";
+
+  sendTelegramReply("📥 Downloading from Telegram...\nFile: " + origName + " (" + String(fileSize / 1024) + " KB)\nSaving as: " + sdName + "\n\nStreaming via M28, please wait...");
+
+  const String& token = notificationsservice.getToken1();
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(15);
+
+  if (!client.connect("api.telegram.org", 443)) {
+    sendTelegramReply("❌ Failed to connect to Telegram server for download!");
+    return;
+  }
+
+  // 1. Call getFile API
+  String req = "GET /bot" + token + "/getFile?file_id=" + fileId + " HTTP/1.1\r\nHost: api.telegram.org\r\nConnection: close\r\n\r\n";
+  client.print(req);
+
+  uint32_t t0 = millis();
+  while (!client.available() && (millis() - t0 < 4000)) delay(10);
+  if (!client.available()) { client.stop(); sendTelegramReply("❌ Timeout getting file info from Telegram!"); return; }
+
+  String filePath = "";
+  String resp = "";
+  while (client.connected() || client.available()) {
+    char c = client.read();
+    if (c == (char)-1) continue;
+    resp += c;
+    if (resp.length() > 2048) break;
+  }
+  client.stop();
+
+  int fpPos = resp.indexOf("\"file_path\":\"");
+  if (fpPos >= 0) {
+    int s = fpPos + 13;
+    int e = resp.indexOf('"', s);
+    if (e > s) filePath = resp.substring(s, e);
+  }
+
+  if (filePath.length() == 0) {
+    sendTelegramReply("❌ Could not resolve Telegram file path!");
+    return;
+  }
+
+  // 2. Download file content and stream to Marlin SD via M28
+  if (!client.connect("api.telegram.org", 443)) {
+    sendTelegramReply("❌ Failed to connect to Telegram file storage!");
+    return;
+  }
+
+  req = "GET /file/bot" + token + "/" + filePath + " HTTP/1.1\r\nHost: api.telegram.org\r\nConnection: close\r\n\r\n";
+  client.print(req);
+
+  t0 = millis();
+  while (!client.available() && (millis() - t0 < 5000)) delay(10);
+  if (!client.available()) { client.stop(); sendTelegramReply("❌ Timeout starting file download!"); return; }
+
+  // Skip HTTP response headers
+  bool inBody = false;
+  String headerBuf = "";
+  while (client.connected() || client.available()) {
+    char c = client.read();
+    if (c == (char)-1) continue;
+    headerBuf += c;
+    if (headerBuf.endsWith("\r\n\r\n")) {
+      inBody = true;
+      break;
+    }
+  }
+
+  if (!inBody) {
+    client.stop();
+    sendTelegramReply("❌ Invalid HTTP response from Telegram!");
+    return;
+  }
+
+  // Start Marlin SD card write
+  String m28 = "M28 " + sdName + "\n";
+  esp3d_serial_service.writeBytes((const uint8_t*)m28.c_str(), m28.length());
+  delay(150);
+
+  // Stream raw G-code chunks directly into Marlin UART
+  uint8_t buf[256];
+  uint32_t bytesSent = 0;
+  while (client.connected() || client.available()) {
+    int avail = client.available();
+    if (avail > 0) {
+      int toRead = min(avail, 256);
+      int n = client.read(buf, toRead);
+      if (n > 0) {
+        esp3d_serial_service.writeBytes(buf, n);
+        bytesSent += n;
+        delay(5); // Throttle UART burst to match Marlin SD write speed
+      }
+    } else {
+      delay(10);
+    }
+    yield();
+  }
+  client.stop();
+
+  delay(200);
+  // Stop Marlin SD write
+  esp3d_serial_service.writeBytes((const uint8_t*)"M29\n", 4);
+  delay(200);
+
+  sendTelegramReply("✅ Upload Successful!\n\nFile: " + sdName + " (" + String(bytesSent / 1024) + " KB)\nSaved to printer SD card.\n\nTo start printing now, tap:\n▶️ /print " + sdName);
 }
 
 // ── Command processing ───────────────────────────────────
@@ -523,7 +810,14 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     return;
   }
 
-  // ── Read-only Status Commands (Allowed even when halted) ──
+  // ── Full System & Printer Diagnostics (/info) ──
+  if (lc == "/info") {
+    esp3d_serial_service.writeBytes((const uint8_t*)"M115\nM851\n", 10);
+    sendPrinterInfoReply();
+    return;
+  }
+
+  // ── Read-only Status Commands ──
   if (lc == "/status") {
     if (_isKilled) {
       sendTelegramReply("🚨 PRINTER HALTED (Emergency Stop / Error)\n\nState: FROZEN / LOCKED\nLCD: PRINTER HALTED / Please Reset\n\n👉 Physical reset required:\nTurn the printer power switch OFF, wait 5 seconds, and turn it back ON.");
@@ -546,11 +840,9 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     return;
   }
   else if (lc == "/pos" || lc == "/position") {
-    if (_isKilled) {
-      sendTelegramReply("🚨 PRINTER HALTED!\nPosition is locked until the printer is reset.");
-      return;
+    if (!_isKilled) {
+      esp3d_serial_service.writeBytes((const uint8_t*)"M114\n", 5);
     }
-    esp3d_serial_service.writeBytes((const uint8_t*)"M114\n", 5);
     String msg = "Tool Head Position:\n";
     msg += "X: " + String(_posX, 2) + " mm\n";
     msg += "Y: " + String(_posY, 2) + " mm\n";
@@ -579,12 +871,13 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     if (_isPrinting || _isPaused) {
       if (_fileName.length() > 0) msg += "File: " + _fileName + "\n";
       msg += "Progress: " + String(_progress, 1) + "%\n";
+      if (_currentLayer > 0) msg += "Layer: " + String(_currentLayer) + " / " + String(_totalLayers) + "\n";
       if (_printTime.length() > 0) msg += "Elapsed: " + _printTime + "\n";
     }
     msg += "Hotend: " + String(_hotendActual, 0) + "/" + String(_hotendTarget, 0) + "C\n";
     msg += "Bed: " + String(_bedActual, 0) + "/" + String(_bedTarget, 0) + "C\n";
     msg += "Z: " + String(_zHeight, 2) + " mm\n";
-    msg += "Speed: " + String(_feedrate) + "% | Flow: " + String(_flowrate) + "%";
+    msg += "Speed: " + String(_feedrate) + "% | Flow: " + String(_flowrate) + "% | Fan: " + String(_fanPct) + "%";
     sendTelegramReply(msg);
     return;
   }
@@ -603,11 +896,12 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
   }
   else if (lc == "/help" || lc == "/start") {
     String msg = "🎮 3D Printer Remote Control\n\n";
-    msg += "📊 MONITORING:\n";
+    msg += "📊 MONITORING & DIAGNOSTICS:\n";
     msg += "/status — Live progress & temps\n";
+    msg += "/info — Complete printer hardware info\n";
     msg += "/temp — Check temperatures\n";
     msg += "/pos — Toolhead coordinates\n";
-    msg += "/display — LCD info & prompt\n";
+    msg += "/display — LCD info & prompts\n";
     msg += "/files — Browse SD card files\n";
     msg += "/check — Test printer connection\n\n";
     msg += "⏯️ PRINT CONTROL:\n";
@@ -617,6 +911,11 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     msg += "/continue — Select 'Continue'\n";
     msg += "/purge — Select 'Purge More'\n";
     msg += "/emergency — 🚨 Instant kill stop\n\n";
+    msg += "⚡ LIVE TUNING:\n";
+    msg += "/speed 120 — Set speed (10-300%)\n";
+    msg += "/flow 100 — Set flow (50-150%)\n";
+    msg += "/fan 100 — Set cooling fan (0-100%)\n";
+    msg += "/zoffset -0.05 — Babystep Z height\n\n";
     msg += "🔥 TEMPERATURE:\n";
     msg += "/preheat_pla — 200C Hotend / 60C Bed\n";
     msg += "/preheat_petg — 240C Hotend / 75C Bed\n";
@@ -631,6 +930,8 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     msg += "/home_x — Home X axis\n";
     msg += "/home_y — Home Y axis\n";
     msg += "/home_z — Home Z axis\n\n";
+    msg += "📁 FILE UPLOAD:\n";
+    msg += "Send any .gcode file to this chat to save directly to the printer SD card!\n\n";
     msg += "🔄 RECOVERY:\n";
     msg += "/reboot — Test/restart (M999)\n";
     msg += "Power switch OFF->ON to reset halt";
@@ -646,8 +947,69 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     return;
   }
 
+  // ── Live Speed Override: /speed <pct> or /speed_<pct> ──
+  if (lc.startsWith("/speed ") || lc.startsWith("/speed_")) {
+    int sp = cmd.indexOf(' ');
+    if (sp < 0) sp = cmd.indexOf('_');
+    int val = cmd.substring(sp + 1).toInt();
+    if (val < 10 || val > 300) {
+      sendTelegramReply("Invalid speed percentage! Range: 10% to 300%.");
+      return;
+    }
+    String gcode = "M220 S" + String(val) + "\n";
+    esp3d_serial_service.writeBytes((const uint8_t*)gcode.c_str(), gcode.length());
+    _feedrate = val;
+    sendTelegramReply("Print speed set to " + String(val) + "% (M220 S" + String(val) + ")");
+  }
+  // ── Live Flow Multiplier: /flow <pct> or /flow_<pct> ──
+  else if (lc.startsWith("/flow ") || lc.startsWith("/flow_")) {
+    int sp = cmd.indexOf(' ');
+    if (sp < 0) sp = cmd.indexOf('_');
+    int val = cmd.substring(sp + 1).toInt();
+    if (val < 50 || val > 150) {
+      sendTelegramReply("Invalid flow percentage! Range: 50% to 150%.");
+      return;
+    }
+    String gcode = "M221 S" + String(val) + "\n";
+    esp3d_serial_service.writeBytes((const uint8_t*)gcode.c_str(), gcode.length());
+    _flowrate = val;
+    sendTelegramReply("Flow multiplier set to " + String(val) + "% (M221 S" + String(val) + ")");
+  }
+  // ── Part Cooling Fan: /fan <pct> or /fan_<pct> ──
+  else if (lc.startsWith("/fan ") || lc.startsWith("/fan_")) {
+    int sp = cmd.indexOf(' ');
+    if (sp < 0) sp = cmd.indexOf('_');
+    int val = cmd.substring(sp + 1).toInt();
+    if (val < 0 || val > 100) {
+      sendTelegramReply("Invalid fan speed! Range: 0% to 100%.");
+      return;
+    }
+    if (val == 0) {
+      esp3d_serial_service.writeBytes((const uint8_t*)"M107\n", 5);
+      _fanPct = 0;
+      sendTelegramReply("Part cooling fan turned OFF (M107)");
+    } else {
+      int pwm = (val * 255) / 100;
+      String gcode = "M106 S" + String(pwm) + "\n";
+      esp3d_serial_service.writeBytes((const uint8_t*)gcode.c_str(), gcode.length());
+      _fanPct = val;
+      sendTelegramReply("Part cooling fan set to " + String(val) + "% (PWM " + String(pwm) + ")");
+    }
+  }
+  // ── Live Z-Babystepping: /zoffset <val> or /babystep <val> ──
+  else if (lc.startsWith("/zoffset ") || lc.startsWith("/babystep ")) {
+    int sp = cmd.indexOf(' ');
+    float val = cmd.substring(sp + 1).toFloat();
+    if (val < -2.0 || val > 2.0) {
+      sendTelegramReply("Invalid Z-offset increment! Range: -2.0 to +2.0 mm.");
+      return;
+    }
+    String gcode = "M290 Z" + String(val, 3) + "\n";
+    esp3d_serial_service.writeBytes((const uint8_t*)gcode.c_str(), gcode.length());
+    sendTelegramReply("Babystep Z adjusted by " + String(val, 2) + " mm (M290 Z" + String(val, 2) + ")");
+  }
   // ── Hotend Temperature: /hotend <deg> or /hotend_<deg> ──
-  if (lc.startsWith("/hotend ") || lc.startsWith("/hotend_") || lc.startsWith("/settemp ") || lc.startsWith("/settemp_")) {
+  else if (lc.startsWith("/hotend ") || lc.startsWith("/hotend_") || lc.startsWith("/settemp ") || lc.startsWith("/settemp_")) {
     int sp = cmd.indexOf(' ');
     if (sp < 0) sp = cmd.indexOf('_');
     String arg = cmd.substring(sp + 1);
@@ -861,6 +1223,8 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
     esp3d_serial_service.writeBytes((const uint8_t*)"M24\n", 4);
     _fileName = selectedFile;
     _progress = 0;
+    _currentLayer = 0;
+    _totalLayers = 0;
     _printTime = "";
     sendTelegramReply("Starting print: " + selectedFile);
   }
@@ -869,7 +1233,7 @@ void TelegramMonitor::processTelegramCommand(String cmd, const String& fromId) {
   }
 }
 
-// ── Poll Telegram for incoming commands ──────────────────
+// ── Poll Telegram for incoming commands & documents ──────
 void TelegramMonitor::pollTelegramUpdates() {
   if (!notificationsservice.started()) return;
   if (notificationsservice.getNotificationType() != ESP_TELEGRAM_NOTIFICATION) return;
@@ -936,7 +1300,7 @@ void TelegramMonitor::pollTelegramUpdates() {
       }
     }
 
-    // Extract text
+    // Extract text command
     int tp = chunk.indexOf("\"text\":\"");
     if (tp >= 0) {
       int ts = tp + 8, te = chunk.indexOf('"', ts);
@@ -948,6 +1312,37 @@ void TelegramMonitor::pollTelegramUpdates() {
         }
       }
     }
+
+    // Extract document upload (G-code file sent via Telegram)
+    int docIdx = chunk.indexOf("\"document\":{");
+    if (docIdx >= 0) {
+      String fid = "", fname = "";
+      uint32_t fsize = 0;
+      int fidPos = chunk.indexOf("\"file_id\":\"", docIdx);
+      if (fidPos >= 0) {
+        int s = fidPos + 11, e = chunk.indexOf('"', s);
+        if (e > s) fid = chunk.substring(s, e);
+      }
+      int fnPos = chunk.indexOf("\"file_name\":\"", docIdx);
+      if (fnPos >= 0) {
+        int s = fnPos + 13, e = chunk.indexOf('"', s);
+        if (e > s) fname = chunk.substring(s, e);
+      }
+      int fsPos = chunk.indexOf("\"file_size\":", docIdx);
+      if (fsPos >= 0) {
+        int s = fsPos + 12, e = s;
+        while (e < (int)chunk.length() && isDigit(chunk.charAt(e))) e++;
+        if (e > s) fsize = chunk.substring(s, e).toInt();
+      }
+
+      if (!_skipFirstPoll && fid.length() > 0 && fname.length() > 0) {
+        _pendingDocFileId = fid;
+        _pendingDocFileName = fname;
+        _pendingDocFileSize = fsize;
+        _pendingDocChatId = fromId;
+      }
+    }
+
     idx = next;
   }
 
@@ -959,10 +1354,7 @@ void TelegramMonitor::handle() {
   if (!_started) return;
   uint32_t now = millis();
 
-  // ────────────────────────────────────────────────────
   // Priority Alerts: Halt notification and Reboot notification
-  // Dispatched safely from main loop context (never from ISR)
-  // ────────────────────────────────────────────────────
   if (_notifyHalt) {
     _notifyHalt = false;
     sendTelegramReply("🚨 PRINTER HALTED (Emergency Stop / Error)!\n\nAll motors and heaters are killed.\n⚠️ Marlin CPU is halted. Hardware reset required.\n👉 Turn printer power switch OFF, wait 5s, then ON.");
@@ -1003,7 +1395,13 @@ void TelegramMonitor::handle() {
     _needAutoM108 = false;
   }
 
-  // 1. Execute queued command
+  // 1. Handle incoming G-code file upload from Telegram
+  if (_pendingDocFileId.length() > 0) {
+    handleTelegramFileUpload();
+    return;
+  }
+
+  // 2. Execute queued command
   if (_pendingCommand.length() > 0) {
     String cmd = _pendingCommand;
     String fid = _pendingFromId;
@@ -1013,7 +1411,7 @@ void TelegramMonitor::handle() {
     return;
   }
 
-  // 2. Send file list reply (deferred from serial ISR)
+  // 3. Send file list reply (deferred from serial ISR)
   if (_pendingFilesRequest && _readyToSendFileList) {
     _pendingFilesRequest = false;
     _readyToSendFileList = false;
@@ -1022,7 +1420,7 @@ void TelegramMonitor::handle() {
     return;
   }
 
-  // 3. File list timeout (4 seconds)
+  // 4. File list timeout (4 seconds)
   if (_pendingFilesRequest && (now - _filesRequestTime >= 4000)) {
     _pendingFilesRequest = false;
     _readyToSendFileList = false;
@@ -1031,13 +1429,13 @@ void TelegramMonitor::handle() {
     return;
   }
 
-  // 4. Poll Telegram every 4 seconds
+  // 5. Poll Telegram every 4 seconds
   if (now - _lastTelegramPollTime >= TELEGRAM_POLL_INTERVAL) {
     _lastTelegramPollTime = now;
     pollTelegramUpdates();
   }
 
-  // 5. Poll Marlin for live data
+  // 6. Poll Marlin for live data
   if (_isPrinting || _isPaused) {
     if (now - _lastPollTime >= 12000) {
       _lastPollTime = now;
@@ -1053,33 +1451,37 @@ void TelegramMonitor::handle() {
     }
   }
 
-  // 6. Detect print start
+  // 7. Detect print start
   if (_isPrinting && !_wasPrinting && !_isPaused && !_isKilled) {
     sendPrintStarted();
     _lastPrintUpdateTime = now;
     _wasPrinting = true;
+    _currentLayer = 0;
+    _totalLayers = 0;
     esp3d_serial_service.writeBytes((const uint8_t*)"M27 C\n", 6);
     esp3d_serial_service.writeBytes((const uint8_t*)"M31\n", 4);
   }
 
-  // 7. Detect print finished (only when NOT paused, NOT auto-breaking, NOT killed)
+  // 8. Detect print finished (only when NOT paused, NOT auto-breaking, NOT killed)
   if (!_isPrinting && !_isPaused && !_autoBreakWaits && !_isKilled && _wasPrinting) {
     sendPrintFinished();
     _wasPrinting = false;
     _progress = 0;
+    _currentLayer = 0;
+    _totalLayers = 0;
     _printTime = "";
     _fileName = "";
     _marlinPrompt = "";
     _lastIdleUpdateTime = now;
   }
 
-  // 8. Periodic print update (every 1 minute)
+  // 9. Periodic print update (every 1 minute)
   if ((_isPrinting || _isPaused) && !_isKilled && (now - _lastPrintUpdateTime >= TELEGRAM_PRINT_INTERVAL)) {
     sendStatusUpdate();
     _lastPrintUpdateTime = now;
   }
 
-  // 9. Periodic idle update (every 5 minutes)
+  // 10. Periodic idle update (every 5 minutes)
   if (!_isPrinting && !_isPaused && !_autoBreakWaits && !_isKilled && (now - _lastIdleUpdateTime >= TELEGRAM_IDLE_INTERVAL)) {
     sendIdleStatus();
     _lastIdleUpdateTime = now;

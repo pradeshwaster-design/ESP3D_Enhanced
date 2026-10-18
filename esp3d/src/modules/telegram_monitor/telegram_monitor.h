@@ -1,14 +1,13 @@
 /*
   telegram_monitor.h - 2-Way Interactive Telegram Monitor & Remote Control
   
-  V6 - Hardware-Verified Reboot & Strict Halt Enforcement:
-  - M112 Emergency Stop permanently halts the printer CPU (STM32 cli())
-  - Bot NEVER assumes the printer is alive until proven by serial boot message or M105/M115 response
-  - Auto-detects physical power cycle / reset via Marlin boot messages (echo:start, SD card ok)
-  - Active ping verification via /reboot or /check
-  - Blocks all motion, heating, and print commands while halted
-  - Single-tap clickable commands: /preheat_pla, /preheat_petg, /home_all, /print_<n>
-  - Strict validation for /purge, /continue, /load, /unload
+  V7 - Remote G-Code Upload, Live Tuning & Complete System Info:
+  - Telegram G-code upload via Serial M28/M29 stream directly to printer SD
+  - Live Tuning: /speed <pct>, /flow <pct>, /fan <pct>, /zoffset <+/-val>
+  - Layer progress tracking (;LAYER:<num>, ;LAYER_COUNT:<num>, M117 Layer X/Y)
+  - Full system & printer diagnostic command: /info
+  - Hardware-verified reboot detection and M112 emergency halt lock
+  - Clickable single-tap commands and direct /print_<n> links
 */
 
 #ifndef _TELEGRAM_MONITOR_H
@@ -45,6 +44,12 @@ class TelegramMonitor {
   String _pendingCommand;
   String _pendingFromId;
 
+  // Queued G-code file upload from Telegram
+  String _pendingDocFileId;
+  String _pendingDocFileName;
+  uint32_t _pendingDocFileSize;
+  String _pendingDocChatId;
+
   // Printer state
   bool _isPrinting;
   bool _wasPrinting;
@@ -69,7 +74,15 @@ class TelegramMonitor {
   float _posE;
   int _feedrate;
   int _flowrate;
+  int _fanPct;
+  int _currentLayer;
+  int _totalLayers;
   String _printTime;
+
+  // Machine info from M115 & M851
+  String _firmwareVersion;
+  String _machineType;
+  String _zOffset;
 
   // Auto-break: break through multiple wait_for_user and prompt loops
   bool _autoBreakWaits;          // True = auto-send M876 S1 + M108 when prompt detected
@@ -94,6 +107,8 @@ class TelegramMonitor {
   void sendPrintStarted();
   void sendPrintFinished();
   void sendSDFileListReply();
+  void sendPrinterInfoReply();
+  void handleTelegramFileUpload();
 
   void pollTelegramUpdates();
   void processTelegramCommand(String cmd, const String& fromId);
